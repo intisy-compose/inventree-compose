@@ -9,7 +9,7 @@ assets from batch files validated against it first. Run through the CLI:
 import argparse
 import sys
 
-from inventory import assets, images, sync
+from inventory import assets, images, previews, sync
 from inventory.api import ApiError
 from inventory.settings import connect
 from inventory.taxonomy import CatalogError, load_catalog, load_toml
@@ -29,13 +29,17 @@ def run(arguments):
     client = connect()
     command = arguments.command
     if command == "check":
-        lines = sync.check(taxonomy, client) + assets.check_items(client)
+        lines = (sync.check(taxonomy, client) + [change.summary for change in assets.plan_label_tags(taxonomy, client)]
+                 + assets.check_items(client))
         print("\n".join(lines) if lines else "catalog and InvenTree agree")
         return 1 if lines else 0
     if command == "sync":
-        lines = sync.sync(taxonomy, client) + images.apply_model_images(taxonomy, client, only_missing=True)
+        lines = (sync.sync(taxonomy, client) + sync.run(assets.plan_label_tags(taxonomy, client))
+                 + images.apply_model_images(taxonomy, client, only_missing=True))
     elif command == "images":
         lines = images.apply_model_images(taxonomy, client, only_missing=False)
+    elif command == "previews":
+        lines = previews.render_previews(taxonomy, client, arguments.file)
     elif command == "add":
         lines = assets.add_assets(batch_from(arguments.file), taxonomy, client)
     elif command == "update":
@@ -48,8 +52,8 @@ def run(arguments):
 
 def main():
     parser = argparse.ArgumentParser(prog="docker-compose.ps1 catalog")
-    parser.add_argument("command", choices=["check", "sync", "add", "update", "list", "images"])
-    parser.add_argument("file", nargs="?", help="batch file for add / update")
+    parser.add_argument("command", choices=["check", "sync", "add", "update", "list", "images", "previews"])
+    parser.add_argument("file", nargs="?", help="batch file for add / update, or one model name for previews")
     try:
         return run(parser.parse_args())
     except (CatalogError, ApiError) as error:
