@@ -160,8 +160,10 @@ def job_of(found):
     return "compute" if found.cpu_mark else "storage" if found.terabytes else None
 
 
-def summary(name, found, config, utilisation, measured=None):
-    """Watts and score of a machine or location. Compute work scales with use, stored terabytes do not."""
+def summary(name, found, config, utilisation, measured=None, on_share=1.0):
+    """Watts and score of a machine or location. Compute work scales with use, stored terabytes do not.
+    A machine switched off part of the time (`on_share`) draws that much less on average; its score is
+    taken while it is on, so switching it off does not make it look more efficient."""
     average = found.average_w(utilisation)
     job = job_of(found)
     score = None
@@ -170,7 +172,7 @@ def summary(name, found, config, utilisation, measured=None):
         work = found.cpu_mark * utilisation if job == "compute" else found.terabytes
         score = log_score(work / average, reference)
     return {"name": name, "job": job, "utilisation": utilisation, "idle_w": round(found.wall_idle_w, 1),
-            "average_w": round(average, 1), "load_w": round(found.wall_load_w, 1),
+            "average_w": round(average * on_share, 1), "on_share": on_share, "load_w": round(found.wall_load_w, 1),
             "loss_w": round(found.loss_idle_w + utilisation * (found.loss_load_w - found.loss_idle_w), 1),
             "cpu_mark": round(found.cpu_mark), "terabytes": round(found.terabytes, 1), "score": score,
             "measured": measured, "parts": found.parts}
@@ -215,6 +217,10 @@ def utilisation_of(name, config):
     return machine.get("utilisation", config["utilisation"])
 
 
+def on_share_of(name, config):
+    return config.get("machines", {}).get(name, {}).get("on_share", 1.0)
+
+
 def measured_of(name, config):
     return config.get("machines", {}).get(name, {}).get("measured")
 
@@ -229,12 +235,12 @@ def machine_summaries(inventory, config):
     for host in host_machines(inventory):
         name = f"{host.serial} {host.part}"
         rows.append(summary(name, totals([host, *inventory.installed_in(host)], inventory.parameters_of), config,
-                            utilisation_of(host.serial, config), measured_of(host.serial, config)))
+                            utilisation_of(host.serial, config), measured_of(host.serial, config), on_share_of(host.serial, config)))
     for name in config.get("machine_locations", []):
         pk = inventory.location_named(name)
         if pk is not None:
             rows.append(summary(name, totals(inventory.location_and_below(pk), inventory.parameters_of), config,
-                                utilisation_of(name, config), measured_of(name, config)))
+                                utilisation_of(name, config), measured_of(name, config), on_share_of(name, config)))
     return [row for row in rows if row["average_w"] > 0]
 
 
