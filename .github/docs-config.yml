@@ -1,0 +1,2 @@
+kind: generic
+description: "Self-hosted [InvenTree](https://github.com/inventree/InvenTree) in Docker over Tailscale, with a catalog tool that drives the inventory from TOML files and prints QR labels for CD label sheets."

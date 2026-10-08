@@ -1,0 +1,28 @@
+# Runs inside the tailscale container's network namespace. Certificates for the ts.net name come
+# from tailscaled over its socket, so every device on the tailnet gets real, auto-renewed HTTPS.
+{
+	admin off
+	auto_https disable_redirects
+}
+
+{$INVENTREE_HOST}:443 {
+	encode gzip
+	request_body {
+		max_size 100MB
+	}
+	handle_path /static/* {
+		root * /srv/inventree/static
+		file_server
+	}
+	# Uploaded files are served only to signed-in users; InvenTree answers the auth check.
+	handle_path /media/* {
+		forward_auth server:8000 {
+			uri /auth/
+		}
+		root * /srv/inventree/media
+		file_server
+	}
+	handle {
+		reverse_proxy server:8000
+	}
+}

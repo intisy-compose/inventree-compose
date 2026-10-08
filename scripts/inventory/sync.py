@@ -1,0 +1,232 @@
+"""Makes InvenTree match catalog.toml. Every difference becomes a Change, so `check` lists exactly what
+`sync` would do."""
+
+from dataclasses import dataclass
+from typing import Callable
+
+
+UNTESTED_STATE = {"key": 11, "name": "UNTESTED", "label": "Untested", "color": "secondary", "logical_key": 10,
+                  "reference_status": "StockStatus"}
+# A computer's parts are installed in it without the computer being an assembly with a bill of materials.
+GLOBAL_SETTINGS = {"SERIAL_NUMBER_GLOBALLY_UNIQUE": True, "INVENTREE_DEFAULT_CURRENCY": "EUR",
+                   "STOCK_ENFORCE_BOM_INSTALLATION": False}
+
+
+@dataclass
+class Change:
+    summary: str
+    apply: Callable[[], None]
+
+
+def by_name(rows):
+    return {row["name"].lower(): row for row in rows}
+
+
+def tags_by_pk(client, endpoint, tag_names):
+    """List endpoints leave tags out and treat `tags=` as a filter, so one filtered query per tag maps them."""
+    tags = {}
+    for tag in tag_names:
+        for row in client.get(endpoint, tags=tag):
+            tags.setdefault(row["pk"], set()).add(tag)
+    return tags
+
+
+def stages(taxonomy, client):
+    """Each stage is planned only after the previous one ran, since later stages refer to rows earlier
+    ones create; `check` plans them all against the current state instead."""
+    return [
+        lambda: plan_settings(client),
+        lambda: plan_untested_state(client),
+        lambda: plan_categories(taxonomy, client),
+        lambda: plan_templates(taxonomy, client),
+        lambda: plan_category_links(taxonomy, client),
+        lambda: plan_locations(taxonomy, client),
+        lambda: plan_parts(taxonomy, client),
+        lambda: plan_parameters(taxonomy, client),
+    ]
+
+
+def check(taxonomy, client):
+    return [change.summary for stage in stages(taxonomy, client) for change in stage()]
+
+
+def sync(taxonomy, client):
+    return [line for stage in stages(taxonomy, client) for line in run(stage())]
+
+
+def run(changes):
+    for change in changes:
+        change.apply()
+    return [change.summary for change in changes]
+
+
+def plan_settings(client):
+    changes = []
+    for key, wanted in GLOBAL_SETTINGS.items():
+        current = client.get(f"/api/settings/global/{key}/")["value"]
+        if current != wanted:
+            changes.append(Change(f"~ setting {key}: {current} -> {wanted}",
+                                  lambda key=key, wanted=wanted: client.patch(f"/api/settings/global/{key}/", {"value": wanted})))
+    return changes
+
+
+def plan_untested_state(client):
+    existing = client.get("/api/generic/status/custom/")
+    if any(state["key"] == UNTESTED_STATE["key"] for state in existing):
+        return []
+    model = client.get("/api/contenttype/model/stockitem/")["pk"]
+    return [Change("+ stock status Untested", lambda: client.post("/api/generic/status/custom/", {**UNTESTED_STATE, "model": model}))]
+
+
+def plan_categories(taxonomy, client):
+    categories = by_name(client.get("/api/part/category/"))
+    changes = []
+    for key, category in taxonomy["categories"].items():
+        body = {"name": category["name"], "description": category.get("description", "")}
+        current = categories.get(key)
+        if current is None:
+            changes.append(Change(f"+ category {category['name']}", lambda body=body: client.post("/api/part/category/", body)))
+        elif current["description"] != body["description"]:
+            changes.append(Change(f"~ category {category['name']}: description",
+                                  lambda pk=current["pk"], body=body: client.patch(f"/api/part/category/{pk}/", body)))
+    return changes
+
+
+def template_body(field):
+    kind = field.get("type", "TEXT")
+    return {"name": field["name"], "description": field.get("help", ""), "units": "",
+            "checkbox": kind == "BOOLEAN", "choices": ",".join(field.get("options", [])) if kind == "OPTION" else ""}
+
+
+def plan_templates(taxonomy, client):
+    templates = by_name(client.get("/api/parameter/template/"))
+    changes = []
+    for key, field in taxonomy["fields"].items():
+        body = template_body(field)
+        current = templates.get(key)
+        if current is None:
+            changes.append(Change(f"+ field {field['name']}", lambda body=body: client.post("/api/parameter/template/", body)))
+            continue
+        differing = [name for name in ("description", "checkbox", "choices") if current.get(name) != body[name]]
+        if differing:
+            changes.append(Change(f"~ field {field['name']}: {', '.join(differing)}",
+                                  lambda pk=current["pk"], body=body: client.patch(f"/api/parameter/template/{pk}/", body)))
+    return changes
+
+
+def plan_category_links(taxonomy, client):
+    categories = by_name(client.get("/api/part/category/"))
+    templates = by_name(client.get("/api/parameter/template/"))
+    linked = {(row["category"], row["template"]) for row in client.get("/api/part/category/parameters/")}
+    changes = []
+    for field in taxonomy["fields"].values():
+        template = templates.get(field["name"].lower())
+        for category_name in field.get("categories", []):
+            category = categories.get(category_name.lower())
+            if template and category and (category["pk"], template["pk"]) not in linked:
+                body = {"category": category["pk"], "template": template["pk"]}
+                changes.append(Change(f"+ field {field['name']} on {category_name}",
+                                      lambda body=body: client.post("/api/part/category/parameters/", body)))
+    return changes
+
+
+def parents_first(locations):
+    ordered, placed = [], set()
+    pending = list(locations.values())
+    while pending:
+        ready = [entry for entry in pending if not entry.get("parent") or entry["parent"].lower() in placed]
+        if not ready:
+            raise ValueError("location parents form a cycle")
+        for entry in ready:
+            ordered.append(entry)
+            placed.add(entry["name"].lower())
+            pending.remove(entry)
+    return ordered
+
+
+def plan_locations(taxonomy, client):
+    existing = by_name(client.get("/api/stock/location/"))
+    changes = []
+    for location in parents_first(taxonomy["locations"]):
+        current = existing.get(location["name"].lower()) or existing.get(str(location.get("renamed_from", "")).lower())
+        parent = existing.get(str(location.get("parent", "")).lower())
+        wanted = (location["name"], location.get("description", ""), parent["pk"] if parent else None)
+        if current is None:
+            changes.append(Change(f"+ location {location['name']}", lambda location=location: create_location(client, existing, location)))
+        elif (current["name"], current["description"], current["parent"]) != wanted:
+            body = dict(zip(("name", "description", "parent"), wanted))
+            changes.append(Change(f"~ location {location['name']}",
+                                  lambda pk=current["pk"], body=body: client.patch(f"/api/stock/location/{pk}/", body)))
+    return changes
+
+
+def create_location(client, existing, location):
+    """Runs parents first, so a new child finds the parent this same pass just created."""
+    parent = existing.get(str(location.get("parent", "")).lower())
+    body = {"name": location["name"], "description": location.get("description", ""), "parent": parent["pk"] if parent else None}
+    created = client.post("/api/stock/location/", body)
+    existing[created["name"].lower()] = created
+
+
+def part_body(model, categories):
+    category = categories.get(model["category"].lower())
+    return {"name": model["name"], "description": model.get("description", "")[:250],
+            "category": category["pk"] if category else None,
+            "trackable": True, "component": True, "purchaseable": False, "active": True}
+
+
+def plan_parts(taxonomy, client):
+    categories = by_name(client.get("/api/part/category/"))
+    parts = by_name(client.get("/api/part/"))
+    part_tags = tags_by_pk(client, "/api/part/", [tag["name"] for tag in taxonomy["tags"].values()])
+    changes = []
+    for key, model in taxonomy["models"].items():
+        body = part_body(model, categories)
+        tags = sorted(model.get("tags", []))
+        current = parts.get(key)
+        if current is None:
+            changes.append(Change(f"+ model {model['name']}", lambda body=body, tags=tags: client.post("/api/part/", {**body, "tags": tags})))
+            continue
+        differing = [name for name in ("description", "category") if current.get(name) != body[name]]
+        if sorted(part_tags.get(current["pk"], set())) != tags:
+            differing.append("tags")
+        if differing:
+            changes.append(Change(f"~ model {model['name']}: {', '.join(differing)}",
+                                  lambda pk=current["pk"], body=body, tags=tags: client.patch(f"/api/part/{pk}/", {**body, "tags": tags})))
+    return changes
+
+
+def parameter_text(value):
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def plan_parameters(taxonomy, client):
+    parts = by_name(client.get("/api/part/"))
+    templates = by_name(client.get("/api/parameter/template/"))
+    existing = {}
+    for row in client.get("/api/parameter/", model_type="part.part"):
+        existing[(row["model_id"], row["template"])] = row
+    changes = []
+    for key, model in taxonomy["models"].items():
+        part = parts.get(key)
+        if part is None:
+            continue
+        for name, value in model.get("fields", {}).items():
+            template = templates[name.lower()]
+            text = parameter_text(value)
+            current = existing.pop((part["pk"], template["pk"]), None)
+            body = {"template": template["pk"], "model_type": "part.part", "model_id": part["pk"], "data": text}
+            if current is None:
+                changes.append(Change(f"+ {model['name']}: {name} = {text}", lambda body=body: client.post("/api/parameter/", body)))
+            elif current["data"] != text:
+                changes.append(Change(f"~ {model['name']}: {name} = {text}",
+                                      lambda pk=current["pk"], body=body: client.patch(f"/api/parameter/{pk}/", body)))
+    declared = {parts[key]["pk"] for key in taxonomy["models"] if key in parts}
+    for (part_pk, _), row in existing.items():
+        if part_pk in declared:
+            changes.append(Change(f"- parameter {row['pk']} on part {part_pk}", lambda pk=row["pk"]: client.delete(f"/api/parameter/{pk}/")))
+    return changes
