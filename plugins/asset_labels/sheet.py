@@ -29,6 +29,8 @@ TAG_MIN_WIDTH_MM = 12.0
 TAG_MAX_WIDTH_MM = {"full": 60.0, "cd": 33.0}
 CONTINUED = " (continued)"
 BOLD_WIDENING = 1.07
+# Round dots (zero-length dashes with round caps), so a cut line never reads as a group outline.
+CUT_LINE = "0.2 w 1 J 0.45 G [0 0.6] 0 d"
 
 HELVETICA_BOLD = {"S": 667, "A": 722, "M": 833, "-": 333, **{digit: 556 for digit in "0123456789"}}
 HELVETICA = dict(zip(
@@ -165,7 +167,7 @@ def text_operator(font, size_mm, x, y, text):
 def label_drawing(label):
     """PDF operators for one label in its own frame: x across, y outwards from the ring centre, in mm."""
     size = SIZES[label.size]
-    operators = [f"0.1 w 0.6 G {-size.width / 2:.3f} 0 {size.width:.3f} {size.height:.3f} re S", "0 g"]
+    operators = [f"{CUT_LINE} {-size.width / 2:.3f} 0 {size.width:.3f} {size.height:.3f} re S", "0 g"]
     baseline = PADDING_MM + 0.2
     if size.name_text:
         for line in reversed(wrap(label.name, size.name_text, size.width - 2 * PADDING_MM, 2)):
