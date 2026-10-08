@@ -129,7 +129,8 @@ class InventoryDashboardPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugi
         if config is None:
             return []
         inventory = power_inventory()
-        data = {"machines": [{**row, "parts": []} for row in power.machine_summaries(inventory, config)],
+        machines = sorted(power.machine_summaries(inventory, config), key=lambda row: row["name"].split(" ", 1)[-1])
+        data = {"machines": [{**row, "parts": []} for row in machines],
                 "locations": power.location_summaries(inventory, config)}
         return [self.widget("power", "Power and efficiency", "Watts and score of every machine and location", "renderPower",
                             data, width=8, height=5)]
