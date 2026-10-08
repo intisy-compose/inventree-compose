@@ -48,14 +48,23 @@ drift into "Electronics" and half a dozen spellings of the same thing:
   items whose serial number is the asset ID (`SAM-0001`). The whole batch is validated before
   anything is written. A part inside a computer or enclosure is installed in that item.
 - `catalog labels` prints labels onto A4 CD label sheets: large (QR code, ID and name), standard
-  (QR code and ID) or small (ID only), placed radially around both rings to be cut apart. Each
-  asset carries its size as a tag; scanning the QR code opens the item.
+  (QR code and ID) or small (ID only), around both rings, inside the centre discs and on the sheet
+  around them, to be cut apart. Each asset carries its size as a tag; scanning the QR code opens
+  the item.
 - `scripts/import_shelf.py` moved an inventory over from
   [shelf-compose](https://github.com/intisy-compose/shelf-compose), keeping every asset ID.
 
 It needs Python 3.11 or newer on the host, with [Pillow](https://pypi.org/project/pillow/) for
 images and [segno](https://pypi.org/project/segno/) for QR codes. The public data template ships a
 starter `catalog.toml`; `CATALOG.md` in a data repo documents the rules.
+
+## Dashboard
+
+`plugins/inventory_dashboard` is a small InvenTree plugin, mounted into the server, with five
+dashboard widgets for this kind of inventory: an overview with value by category, what needs
+attention (untested, faulty, broken), the machines with their installed parts, the newest assets,
+and how many stickers of each size there are. Activate it under Admin > Plugins (with "Enable
+interface integration" on), then add the widgets from the dashboard menu.
 
 ## Data and backups
 
