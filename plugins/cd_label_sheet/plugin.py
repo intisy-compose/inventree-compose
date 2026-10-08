@@ -1,5 +1,5 @@
-"""A label printer that turns the stock items selected in InvenTree into CD label sheets: the same
-layout as `catalog labels`, one PDF to download and print."""
+"""A label printer that turns the stock items selected in InvenTree into A4 sticker sheets, CD label
+sheets or full sticker sheets: one PDF to download and print."""
 
 from django.core.files.base import ContentFile
 from django.core.exceptions import ValidationError
@@ -9,7 +9,7 @@ from rest_framework import serializers
 from plugin import InvenTreePlugin
 from plugin.mixins import LabelPrintingMixin
 
-from .sheet import LABEL_SIZES_PRINTED, Label, sheets_pdf
+from .sheet import LABEL_SIZES_PRINTED, SHEET_TYPES, Label, sheets_pdf
 
 SIZE_FROM_TAG = "tag"
 LABEL_TAG = "label-"
@@ -31,18 +31,19 @@ def site_url(request):
 class CdLabelSheetPlugin(LabelPrintingMixin, InvenTreePlugin):
     NAME = "CdLabelSheet"
     SLUG = "cd-label-sheet"
-    TITLE = "CD label sheet"
-    DESCRIPTION = "Prints asset labels onto A4 CD label sheets, every size on its own sheets"
+    TITLE = "Label sheets"
+    DESCRIPTION = "Prints asset labels onto A4 CD label sheets or full sticker sheets, every size on its own sheets"
     VERSION = "1.0.0"
     AUTHOR = "intisy"
 
     class PrintingOptionsSerializer(serializers.Serializer):
+        sheet = serializers.ChoiceField(choices=list(SHEET_TYPES.items()), default="cd", label="Sticker paper")
         size = serializers.ChoiceField(
             choices=[(SIZE_FROM_TAG, "Each asset's own size"), *[(size, size.capitalize()) for size in LABEL_SIZES_PRINTED]],
             default=SIZE_FROM_TAG, label="Label size",
             help_text="Assets whose own size is none are skipped unless a size is chosen here")
         outline = serializers.BooleanField(default=False, label="Draw the ring edges",
-                                           help_text="For a test print on plain paper")
+                                           help_text="CD label sheets only: for a test print against a sheet")
 
     def labels_for(self, items, request, size_override):
         labels = []
@@ -59,5 +60,5 @@ class CdLabelSheetPlugin(LabelPrintingMixin, InvenTreePlugin):
         labels = self.labels_for(items, request, options.get("size", SIZE_FROM_TAG))
         if not labels:
             raise ValidationError("None of the selected items gets a label: they need a serial number and a size other than none")
-        pdf, _ = sheets_pdf(labels, bool(options.get("outline")))
+        pdf, _ = sheets_pdf(labels, bool(options.get("outline")), options.get("sheet", "cd"))
         output.mark_complete(progress=len(items), output=ContentFile(pdf, "cd-labels.pdf"))

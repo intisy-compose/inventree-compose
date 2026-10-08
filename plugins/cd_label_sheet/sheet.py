@@ -1,19 +1,20 @@
-"""Lays asset labels out on A4 CD label sheets and cuts nothing to waste: labels sit radially around
-each ring, upright inside each centre disc and upright on the sheet around the rings, to be cut
-apart after printing. Every size gets its own sheets; `none` items are only listed."""
+"""Lays asset labels out on A4 sticker sheets, to be cut apart after printing. On a CD label sheet
+nothing goes to waste: labels sit radially around each ring, upright inside each centre disc and
+upright on the sheet around the rings. On a full sticker sheet they sit on a grid. Every size gets
+its own sheets."""
 
 import math
-import os
 from dataclasses import dataclass
 
 PAGE_SIZE_MM = (210, 297)
 # Calibrated for the human partner's printer, paper pushed against the tray guide: see RULES.md in compose/docs.
 PRINT_SCALE = 0.975
-RING_CENTRES_MM = ((104.9, 72.1), (104.9, 224.3))
+RING_CENTRES_MM = ((105.4, 72.1), (105.4, 224.3))
 RING_OUTER_RADIUS_MM = 58.0 / PRINT_SCALE
 RING_HOLE_RADIUS_MM = 20.32 / PRINT_SCALE
-RING_SAFETY_MM = 2.5
+RING_SAFETY_MM = 2.0
 SHEET_MARGIN_MM = 8.0
+SHEET_TYPES = {"cd": "CD label sheet", "full": "Full sticker sheet"}
 LABEL_GAP_MM = 1.0
 PADDING_MM = 0.6
 QR_QUIET_MODULES = 2
@@ -126,11 +127,20 @@ def outside_slots(size):
             if all(distance_to_rectangle(centre, rectangle) >= clearance for centre in RING_CENTRES_MM)]
 
 
-def page_slots(size):
+def cd_sheet_slots(size):
     slots = []
     for centre in RING_CENTRES_MM:
         slots += ring_slots(size, centre) + disc_slots(size, centre)
     return slots + outside_slots(size)
+
+
+def full_sheet_slots(size):
+    box = (SHEET_MARGIN_MM, SHEET_MARGIN_MM, PAGE_SIZE_MM[0] - SHEET_MARGIN_MM, PAGE_SIZE_MM[1] - SHEET_MARGIN_MM)
+    return [upright(rectangle) for rectangle in grid(size, *box)]
+
+
+def page_slots(size, sheet):
+    return cd_sheet_slots(size) if sheet == "cd" else full_sheet_slots(size)
 
 
 def qr_modules(url):
@@ -220,7 +230,8 @@ def circle_path(x, y, radius):
 
 
 def sheet_content(placed, outline):
-    """One page: every (slot, drawing), with y flipped so slots read from the top-left."""
+    """One page: every (slot, drawing), with y flipped so slots read from the top-left. The outline
+    draws the CD rings, for a test print against a sheet."""
     points_per_mm = 72 / 25.4
     operators = [f"{points_per_mm:.6f} 0 0 {points_per_mm:.6f} 0 0 cm"]
     if outline:
@@ -261,8 +272,8 @@ def pdf_document(pages):
     return output
 
 
-def size_pages(labels, size, outline):
-    slots = page_slots(SIZES[size])
+def size_pages(labels, size, outline, sheet):
+    slots = page_slots(SIZES[size], sheet)
     pages = []
     for first in range(0, len(labels), len(slots)):
         batch = labels[first:first + len(slots)]
@@ -270,24 +281,14 @@ def size_pages(labels, size, outline):
     return pages, len(slots)
 
 
-def sheets_pdf(labels, outline):
+def sheets_pdf(labels, outline, sheet="cd"):
     """The whole print job as PDF bytes, and one summary line per size."""
     pages, lines = [], []
     for size in PRINT_ORDER:
         sized = [label for label in labels if label.size == size]
         if not sized:
             continue
-        size_pages_list, per_sheet = size_pages(sized, size, outline)
+        size_pages_list, per_sheet = size_pages(sized, size, outline and sheet == "cd", sheet)
         pages += size_pages_list
         lines.append(f"  {size}: {len(sized)} labels on {len(size_pages_list)} sheet(s), {per_sheet} per sheet")
     return (pdf_document(pages) if pages else None), lines
-
-
-def write_sheets(labels, output, outline):
-    pdf, lines = sheets_pdf(labels, outline)
-    if pdf is None:
-        return lines
-    os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
-    with open(output, "wb") as handle:
-        handle.write(pdf)
-    return [f"+ {output}; print at actual size"] + lines
