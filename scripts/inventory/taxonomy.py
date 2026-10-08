@@ -126,7 +126,7 @@ def validate_power(taxonomy):
             require(taxonomy, "fields", power_class.get("figure"), f"[power] class '{power_class.get('name')}'")
     for job in ("compute", "storage"):
         validate_reference(power.get("references", {}).get(job), f"[power] references.{job}")
-    for name in [*power.get("machine_locations", []), *power.get("group_locations", [])]:
+    for name in power.get("group_locations", []):
         require(taxonomy, "locations", name, "[power]")
     for name, machine in power.get("machines", {}).items():
         for key in ("utilisation", "on_share"):

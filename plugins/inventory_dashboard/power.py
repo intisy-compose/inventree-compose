@@ -2,7 +2,7 @@
 
 Pure Python without Django, so it can be checked outside the server. The definitions are in
 `docs/specs/2026-10-08-power-efficiency.md` of the compose org; the numbers (utilisation, reference
-points, which locations are machines) come from the `[power]` table of the catalog, never from here.
+points, which locations are groups) come from the `[power]` table of the catalog, never from here.
 """
 
 import math
@@ -226,7 +226,7 @@ def measured_of(name, config):
 
 
 def host_machines(inventory):
-    """Bought computers and enclosures: items with parts installed in them."""
+    """Every machine is one item with its parts installed in it: a computer, a case or an enclosure."""
     return [asset for asset in inventory.assets if any(other.belongs_to == asset.pk for other in inventory.assets)]
 
 
@@ -236,21 +236,16 @@ def machine_summaries(inventory, config):
         name = f"{host.serial} {host.part}"
         rows.append(summary(name, totals([host, *inventory.installed_in(host)], inventory.parameters_of), config,
                             utilisation_of(host.serial, config), measured_of(host.serial, config), on_share_of(host.serial, config)))
-    for name in config.get("machine_locations", []):
-        pk = inventory.location_named(name)
-        if pk is not None:
-            rows.append(summary(name, totals(inventory.location_and_below(pk), inventory.parameters_of), config,
-                                utilisation_of(name, config), measured_of(name, config), on_share_of(name, config)))
     return [row for row in rows if row["average_w"] > 0]
 
 
 def powered_assets(inventory, config):
-    """What actually draws power: host machines with their parts, and everything in a machine location or a
-    group location (the Pi cluster with its shared supplies). Loose spares draw nothing."""
+    """What actually draws power: machines with their parts, and everything in a group location (the Pi
+    cluster with its shared switch and supplies). Loose spares draw nothing."""
     powered = set()
     for host in host_machines(inventory):
         powered.update(asset.pk for asset in [host, *inventory.installed_in(host)])
-    for name in [*config.get("machine_locations", []), *config.get("group_locations", [])]:
+    for name in config.get("group_locations", []):
         pk = inventory.location_named(name)
         if pk is not None:
             powered.update(asset.pk for asset in inventory.location_and_below(pk))
