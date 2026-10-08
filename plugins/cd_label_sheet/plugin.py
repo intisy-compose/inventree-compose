@@ -22,7 +22,8 @@ def tagged_size(item):
 
 def group_chain(item):
     """Where the item is, outermost first: the locations of the outermost item it sits in, then every item
-    it is installed in, then the item itself when parts are installed in it (a machine's own label)."""
+    it is installed in, then the item itself when parts are installed in it (a machine's own label). Each
+    is (key, name, the IDs installed directly in it)."""
     hosts = []
     host = item.belongs_to
     while host is not None:
@@ -32,8 +33,23 @@ def group_chain(item):
     locations = list(outermost.location.get_ancestors(include_self=True)) if outermost.location else []
     if item.installed_parts.exists():
         hosts.append(item)
-    return tuple([(f"location-{location.pk}", location.name) for location in locations] +
-                 [(f"item-{host.pk}", f"{host.serial} {host.part.name}") for host in hosts])
+    return tuple([(f"location-{location.pk}", location.name, ()) for location in locations] +
+                 [(f"item-{host.pk}", f"{host.serial} {host.part.name}", installed_ids(host)) for host in hosts])
+
+
+def installed_ids(host):
+    return tuple(sorted(part.serial for part in host.installed_parts.all() if part.serial))
+
+
+def with_installed(items):
+    """The selected items and everything installed in them, all the way down, each once."""
+    seen, result = set(), []
+    for item in items:
+        for each in [item, *item.get_installed_items(cascade=True)]:
+            if each.pk not in seen:
+                seen.add(each.pk)
+                result.append(each)
+    return result
 
 
 def site_url(request):
@@ -61,7 +77,9 @@ class CdLabelSheetPlugin(LabelPrintingMixin, InvenTreePlugin):
         outline = serializers.BooleanField(default=False, label="Draw the ring edges",
                                            help_text="CD label sheets only: for a test print against a sheet")
         groups = serializers.BooleanField(default=False, label="Outline groups",
-                                          help_text="Order the labels by where they are and outline each machine and location in the gaps")
+                                          help_text="Pack every location and machine into its own outlined block, opened by a name tag")
+        installed = serializers.BooleanField(default=False, label="Include installed items",
+                                             help_text="Also print everything installed in the selected items")
 
     def labels_for(self, items, request, size_override):
         labels = []
@@ -75,6 +93,8 @@ class CdLabelSheetPlugin(LabelPrintingMixin, InvenTreePlugin):
 
     def print_labels(self, label, output, items, request, **kwargs):
         options = kwargs.get("printing_options") or {}
+        if options.get("installed"):
+            items = with_installed(items)
         labels = self.labels_for(items, request, options.get("size", SIZE_FROM_TAG))
         if not labels:
             raise ValidationError("None of the selected items gets a label: they need a serial number and a size other than none")

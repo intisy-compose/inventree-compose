@@ -1,13 +1,14 @@
-"""Lays asset labels out on A4 sticker sheets, to be cut apart after printing. On a CD label sheet
-nothing goes to waste: labels sit radially around each ring, upright inside each centre disc and
-upright on the sheet around the rings. On a full sticker sheet they sit on a grid. Every size gets
-its own sheets."""
+"""Lays asset labels and group name tags out on A4 sticker sheets, to be cut apart after printing. Sizes
+mix on one page. On a CD label sheet labels sit radially around each ring, upright inside each centre
+disc and upright on the sheet around the rings; on a full sticker sheet they fill the page. With groups
+on, labels follow where their items are, each group opens with its name tag, gaps grow between groups
+and outlines run around them in the gaps."""
 
 import math
-import zlib
 from dataclasses import dataclass, field
 
-from .outlines import Placed, group_levels, label_corners, outline_mask
+from .layout import FlatArea, Group, RingArea, lay_out
+from .outlines import outline_operators
 
 PAGE_SIZE_MM = (210, 297)
 # Calibrated for the human partner's printer, paper pushed against the tray guide: see RULES.md in compose/docs.
@@ -18,11 +19,15 @@ RING_HOLE_RADIUS_MM = 20.32 / PRINT_SCALE
 RING_SAFETY_MM = 2.0
 SHEET_MARGIN_MM = 8.0
 SHEET_TYPES = {"cd": "CD label sheet", "full": "Full sticker sheet"}
-LABEL_GAP_MM = 1.0
 PADDING_MM = 0.6
 QR_QUIET_MODULES = 2
-PRINT_ORDER = ("large", "standard", "small")
-LABEL_SIZES_PRINTED = PRINT_ORDER
+LABEL_SIZES_PRINTED = ("large", "standard", "small")
+SIZE_RANK = {size: rank for rank, size in enumerate(LABEL_SIZES_PRINTED)}
+TAG_NAME_TEXT_MM = 2.2
+TAG_CONTENT_TEXT_MM = 1.6
+TAG_MIN_WIDTH_MM = 12.0
+TAG_MAX_WIDTH_MM = 33.0
+BOLD_WIDENING = 1.07
 
 HELVETICA_BOLD = {"S": 667, "A": 722, "M": 833, "-": 333, **{digit: 556 for digit in "0123456789"}}
 HELVETICA = dict(zip(
@@ -52,101 +57,51 @@ SIZES = {
 
 @dataclass
 class Label:
-    """`groups` is where the item is, outermost first: (key, name) pairs of its locations and of the items
-    it is installed in. A label without an asset ID is a group's name tag in a spare slot."""
+    """An asset's label. `groups` is where the item is, outermost first: (key, name, contents) for each of
+    its locations and of the items it is installed in; contents are the IDs installed directly in an item."""
     asset_id: str
     name: str
     url: str
     size: str
     groups: tuple = field(default_factory=tuple)
 
+    @property
+    def width(self):
+        return SIZES[self.size].width
+
+    @property
+    def height(self):
+        return SIZES[self.size].height
+
+
+@dataclass
+class NameTag:
+    """A group's name at the start of its labels, and for a machine the IDs installed directly in it."""
+    name: str
+    contents: tuple
+    groups: tuple
+    name_lines: list = field(init=False)
+    content_lines: list = field(init=False)
+    width: float = field(init=False)
+    height: float = field(init=False)
+
+    def __post_init__(self):
+        room = TAG_MAX_WIDTH_MM - 2 * PADDING_MM
+        self.name_lines = wrap(self.name, TAG_NAME_TEXT_MM * BOLD_WIDENING, room, 2)
+        self.content_lines = wrap(" ".join(self.contents), TAG_CONTENT_TEXT_MM, room, 4) if self.contents else []
+        widest = max([bold_width(line, TAG_NAME_TEXT_MM) for line in self.name_lines] +
+                     [text_width(line, TAG_CONTENT_TEXT_MM, HELVETICA) for line in self.content_lines])
+        self.width = min(TAG_MAX_WIDTH_MM, max(TAG_MIN_WIDTH_MM, widest + 2 * PADDING_MM))
+        self.height = (2 * PADDING_MM + len(self.name_lines) * TAG_NAME_TEXT_MM * 1.15
+                       + (0.3 + len(self.content_lines) * TAG_CONTENT_TEXT_MM * 1.2 if self.content_lines else 0))
+
 
 def text_width(text, size_mm, widths):
     return sum(widths.get(char, 556) for char in text) / 1000 * size_mm
 
 
-@dataclass
-class Slot:
-    """Where a label goes: the middle of its bottom edge (y from the top of the page), and the
-    direction its top points in, in degrees (90 = up the page)."""
-    x: float
-    y: float
-    angle: float
-
-
-def ring_slots(size, centre):
-    """Radially placed labels in as many circles as fit between the hole and the edge. They only spread
-    apart outwards, so neighbours are spaced by their inner corners and the next circle starts
-    beyond the outer corners."""
-    radius = RING_HOLE_RADIUS_MM + RING_SAFETY_MM
-    limit = RING_OUTER_RADIUS_MM - RING_SAFETY_MM
-    slots = []
-    while math.hypot(radius + size.height, size.width / 2) <= limit:
-        pitch = 2 * math.degrees(math.atan((size.width + LABEL_GAP_MM) / 2 / radius))
-        count = int(360 // pitch)
-        for index in range(count):
-            angle = 90 - index * 360 / count
-            slots.append(Slot(centre[0] + math.cos(math.radians(angle)) * radius,
-                              centre[1] - math.sin(math.radians(angle)) * radius, angle))
-        radius = math.hypot(radius + size.height, size.width / 2) + LABEL_GAP_MM
-    return slots
-
-
-def grid(size, left, top, right, bottom):
-    """Upright label rectangles (left, top, right, bottom) on a regular grid inside a box, centred."""
-    step_x, step_y = size.width + LABEL_GAP_MM, size.height + LABEL_GAP_MM
-    columns = int((right - left + LABEL_GAP_MM) // step_x)
-    rows = int((bottom - top + LABEL_GAP_MM) // step_y)
-    start_x = left + (right - left - (columns * step_x - LABEL_GAP_MM)) / 2
-    start_y = top + (bottom - top - (rows * step_y - LABEL_GAP_MM)) / 2
-    return [(start_x + column * step_x, start_y + row * step_y, start_x + column * step_x + size.width,
-             start_y + row * step_y + size.height) for row in range(rows) for column in range(columns)]
-
-
-def distance_to_rectangle(point, rectangle):
-    left, top, right, bottom = rectangle
-    dx = max(left - point[0], 0, point[0] - right)
-    dy = max(top - point[1], 0, point[1] - bottom)
-    return math.hypot(dx, dy)
-
-
-def farthest_corner(point, rectangle):
-    left, top, right, bottom = rectangle
-    return max(math.hypot(x - point[0], y - point[1]) for x in (left, right) for y in (top, bottom))
-
-
-def upright(rectangle):
-    left, _, right, bottom = rectangle
-    return Slot((left + right) / 2, bottom, 90)
-
-
-def disc_slots(size, centre):
-    limit = RING_HOLE_RADIUS_MM - RING_SAFETY_MM
-    box = (centre[0] - limit, centre[1] - limit, centre[0] + limit, centre[1] + limit)
-    return [upright(rectangle) for rectangle in grid(size, *box) if farthest_corner(centre, rectangle) <= limit]
-
-
-def outside_slots(size):
-    box = (SHEET_MARGIN_MM, SHEET_MARGIN_MM, PAGE_SIZE_MM[0] - SHEET_MARGIN_MM, PAGE_SIZE_MM[1] - SHEET_MARGIN_MM)
-    clearance = RING_OUTER_RADIUS_MM + RING_SAFETY_MM
-    return [upright(rectangle) for rectangle in grid(size, *box)
-            if all(distance_to_rectangle(centre, rectangle) >= clearance for centre in RING_CENTRES_MM)]
-
-
-def cd_sheet_slots(size):
-    slots = []
-    for centre in RING_CENTRES_MM:
-        slots += ring_slots(size, centre) + disc_slots(size, centre)
-    return slots + outside_slots(size)
-
-
-def full_sheet_slots(size):
-    box = (SHEET_MARGIN_MM, SHEET_MARGIN_MM, PAGE_SIZE_MM[0] - SHEET_MARGIN_MM, PAGE_SIZE_MM[1] - SHEET_MARGIN_MM)
-    return [upright(rectangle) for rectangle in grid(size, *box)]
-
-
-def page_slots(size, sheet):
-    return cd_sheet_slots(size) if sheet == "cd" else full_sheet_slots(size)
+def bold_width(text, size_mm):
+    return text_width(text, size_mm, HELVETICA) * BOLD_WIDENING
 
 
 def qr_modules(url):
@@ -198,8 +153,6 @@ def text_operator(font, size_mm, x, y, text):
 
 def label_drawing(label):
     """PDF operators for one label in its own frame: x across, y outwards from the ring centre, in mm."""
-    if not label.asset_id:
-        return name_tag_drawing(label)
     size = SIZES[label.size]
     operators = [f"0.1 w 0.6 G {-size.width / 2:.3f} 0 {size.width:.3f} {size.height:.3f} re S", "0 g"]
     baseline = PADDING_MM + 0.2
@@ -215,22 +168,22 @@ def label_drawing(label):
     return "\n".join(operators)
 
 
-def name_tag_drawing(label):
-    """A group's name in a spare slot, as large as fits on up to three lines."""
-    size = SIZES[label.size]
-    available = size.width - 2 * PADDING_MM
-    for text_size in (2.4, 2.0, 1.7, 1.4):
-        max_lines = max(1, int((size.height - 2 * PADDING_MM) // (text_size * 1.15)))
-        lines = wrap(label.name, text_size, available, min(max_lines, 3))
-        if not lines[-1].endswith("..."):
-            break
-    block = len(lines) * text_size * 1.15
-    baseline = (size.height + block) / 2 - text_size
-    operators = []
-    for line in lines:
-        operators.append(text_operator("F2", text_size, -text_width(line, text_size, HELVETICA) / 2, baseline, line))
-        baseline -= text_size * 1.15
+def tag_drawing(tag):
+    """A group's name tag: a light grey card with the name, and for a machine what is installed in it."""
+    operators = [f"0.9 g {-tag.width / 2:.3f} 0 {tag.width:.3f} {tag.height:.3f} re f", "0 g"]
+    baseline = tag.height - PADDING_MM - TAG_NAME_TEXT_MM * 0.8
+    for line in tag.name_lines:
+        operators.append(text_operator("F1", TAG_NAME_TEXT_MM, -bold_width(line, TAG_NAME_TEXT_MM) / 2, baseline, line))
+        baseline -= TAG_NAME_TEXT_MM * 1.15
+    baseline -= 0.3
+    for line in tag.content_lines:
+        operators.append(text_operator("F2", TAG_CONTENT_TEXT_MM, -text_width(line, TAG_CONTENT_TEXT_MM, HELVETICA) / 2, baseline, line))
+        baseline -= TAG_CONTENT_TEXT_MM * 1.2
     return "\n".join(operators)
+
+
+def entry_drawing(entry):
+    return tag_drawing(entry) if isinstance(entry, NameTag) else label_drawing(entry)
 
 
 def qr_operators(url, size, bottom):
@@ -255,13 +208,11 @@ def circle_path(x, y, radius):
             f"{x + k:.3f} {y - radius:.3f} {x + radius:.3f} {y - k:.3f} {x + radius:.3f} {y:.3f} c S")
 
 
-def sheet_content(placed, outline, with_mask=False):
+def sheet_content(placed, outline, group_outlines=()):
     """One page: every (slot, drawing), with y flipped so slots read from the top-left. The outline
-    draws the CD rings, for a test print against a sheet; the mask is the group outlines' image."""
+    draws the CD rings, for a test print against a sheet; the group outlines run around each group."""
     points_per_mm = 72 / 25.4
-    operators = [f"{points_per_mm:.6f} 0 0 {points_per_mm:.6f} 0 0 cm"]
-    if with_mask:
-        operators.append(f"q 0 g {PAGE_SIZE_MM[0]} 0 0 {PAGE_SIZE_MM[1]} 0 0 cm /Outlines Do Q")
+    operators = [f"{points_per_mm:.6f} 0 0 {points_per_mm:.6f} 0 0 cm"] + outline_operators(group_outlines, PAGE_SIZE_MM[1])
     if outline:
         operators.append("0.2 w 0 G [1 1] 0 d")
         for centre_x, centre_y in RING_CENTRES_MM:
@@ -275,31 +226,24 @@ def sheet_content(placed, outline, with_mask=False):
 
 
 def pdf_document(pages):
-    """A minimal PDF: Helvetica and Helvetica-Bold, one uncompressed content stream per page, and per page
-    an optional 1-bit image mask (the group outlines). `pages` holds (content, mask or None)."""
+    """A minimal PDF: Helvetica and Helvetica-Bold, one uncompressed content stream per page."""
     width, height = (size * 72 / 25.4 for size in PAGE_SIZE_MM)
-    page_ids = [5 + 3 * index for index in range(len(pages))]
+    page_ids = [5 + 2 * index for index in range(len(pages))]
     objects = {
         1: "<< /Type /Catalog /Pages 2 0 R >>",
         2: f"<< /Type /Pages /Kids [{' '.join(f'{page_id} 0 R' for page_id in page_ids)}] /Count {len(pages)} >>",
         3: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
         4: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
     }
-    for page_id, (content, mask) in zip(page_ids, pages):
-        images = f"/XObject << /Outlines {page_id + 2} 0 R >> " if mask is not None else ""
+    for page_id, content in zip(page_ids, pages):
         objects[page_id] = (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width:.2f} {height:.2f}] "
-                            f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> {images}>> /Contents {page_id + 1} 0 R >>")
-        objects[page_id + 1] = stream("", content.encode("latin-1"))
-        if mask is not None:
-            objects[page_id + 2] = stream(f"/Type /XObject /Subtype /Image /Width {mask.width} /Height {mask.height} "
-                                          "/ImageMask true /BitsPerComponent 1 /Decode [1 0] /Filter /FlateDecode ",
-                                          zlib.compress(mask.tobytes(), 9))
+                            f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {page_id + 1} 0 R >>")
+        objects[page_id + 1] = f"<< /Length {len(content.encode('latin-1'))} >>\nstream\n{content}\nendstream"
     output = b"%PDF-1.4\n"
     offsets = {}
     for object_id in sorted(objects):
         offsets[object_id] = len(output)
-        body = objects[object_id]
-        output += f"{object_id} 0 obj\n".encode("latin-1") + (body if isinstance(body, bytes) else body.encode("latin-1")) + b"\nendobj\n"
+        output += f"{object_id} 0 obj\n{objects[object_id]}\nendobj\n".encode("latin-1")
     xref = len(output)
     output += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode("latin-1")
     output += "".join(f"{offsets[object_id]:010d} 00000 n \n" for object_id in sorted(objects)).encode("latin-1")
@@ -307,86 +251,67 @@ def pdf_document(pages):
     return output
 
 
-def stream(dictionary, data):
-    return f"<< {dictionary}/Length {len(data)} >>\nstream\n".encode("latin-1") + data + b"\nendstream"
+def group_tree(labels, grouped):
+    """The top-level labels and groups in order. With groups on, every location and every item with parts
+    in it is a group that opens with its name tag; labels sit in their innermost group, largest first."""
+    def label_order(label):
+        return SIZE_RANK[label.size], label.asset_id
+
+    if not grouped:
+        return sorted((Label(label.asset_id, label.name, label.url, label.size) for label in labels), key=label_order)
+    root = Group("", "", ())
+    for label in labels:
+        node = root
+        for depth, (key, name, contents) in enumerate(label.groups):
+            child = next((group for group in node.children if group.key == key), None)
+            if child is None:
+                child = Group(key, name, contents, NameTag(name, contents, label.groups[:depth + 1]))
+                node.children.append(child)
+            node = child
+        node.labels.append(label)
+
+    def order(group):
+        group.labels.sort(key=label_order)
+        group.children.sort(key=lambda child: child.name)
+        for child in group.children:
+            order(child)
+
+    order(root)
+    return root.labels + root.children
 
 
-def by_group(labels):
-    return sorted(labels, key=lambda label: ([name for _, name in label.groups], label.asset_id))
+def cd_areas():
+    """Both rings and their centre discs, then the sheet beside and between the rings; everything 2 mm
+    from a cut edge. The corners of the sheet around the rings stay empty."""
+    inner = RING_HOLE_RADIUS_MM + RING_SAFETY_MM
+    outer = RING_OUTER_RADIUS_MM - RING_SAFETY_MM
+    disc = RING_HOLE_RADIUS_MM - RING_SAFETY_MM
+    disc_half_width, disc_half_height = 0.6 * disc, 0.77 * disc
+    areas = []
+    for centre_x, centre_y in RING_CENTRES_MM:
+        areas.append(RingArea((centre_x, centre_y), inner, outer))
+        areas.append(FlatArea(centre_x - disc_half_width, centre_y - disc_half_height, centre_x + disc_half_width, centre_y + disc_half_height))
+    clear = RING_OUTER_RADIUS_MM + RING_SAFETY_MM
+    left, top, right, bottom = sheet_box()
+    ring_left = min(x for x, _ in RING_CENTRES_MM) - clear
+    ring_right = max(x for x, _ in RING_CENTRES_MM) + clear
+    band_top = RING_CENTRES_MM[0][1] + clear
+    band_bottom = RING_CENTRES_MM[1][1] - clear
+    return areas + [FlatArea(left, top, ring_left, bottom), FlatArea(ring_left, band_top, ring_right, band_bottom),
+                    FlatArea(ring_right, top, right, bottom)]
 
 
-def with_name_tags(batch, spare):
-    """Spends a page's spare slots on group names, each at the start of its group, innermost groups first."""
-    placed = [Placed([], label.groups) for label in batch]
-    levels, members = group_levels(placed)
-    chosen = sorted(levels, key=lambda group: (levels[group], min(members[group])))[:spare]
-    first_of = {}
-    for group in chosen:
-        first_of.setdefault(min(members[group]), []).append(group)
-    result = []
-    for index, label in enumerate(batch):
-        for group in sorted(first_of.get(index, []), key=lambda group: -levels[group]):
-            chain = label.groups[:label.groups.index(group) + 1]
-            result.append(Label("", group[1], "", label.size, chain))
-        result.append(label)
-    return result
-
-
-def page_batches(labels, capacity, grouped):
-    """Full pages first; only the last page has spare slots, and with groups on they carry the names."""
-    batches = [labels[first:first + capacity] for first in range(0, len(labels), capacity)]
-    if grouped and batches and len(batches[-1]) < capacity:
-        batches[-1] = with_name_tags(batches[-1], capacity - len(batches[-1]))
-    return batches
-
-
-def walking_order(slots, size):
-    """The slots as a walk from the top-left, always on to the nearest free one, so labels that follow each
-    other sit next to each other and a group's labels stay together."""
-    centres = [centre_of(slot, size) for slot in slots]
-    remaining = set(range(len(slots)))
-    current = min(remaining, key=lambda index: centres[index][0] + centres[index][1])
-    order = []
-    while remaining:
-        remaining.discard(current)
-        order.append(slots[current])
-        if remaining:
-            here = centres[current]
-            current = min(remaining, key=lambda index: math.hypot(centres[index][0] - here[0], centres[index][1] - here[1]))
-    return order
-
-
-def centre_of(slot, size):
-    angle = math.radians(slot.angle)
-    return slot.x + math.cos(angle) * size.height / 2, slot.y - math.sin(angle) * size.height / 2
-
-
-def size_pages(labels, size, outline, sheet, grouped=False):
-    label_size = SIZES[size]
-    slots = page_slots(label_size, sheet)
-    if grouped:
-        slots = walking_order(slots, label_size)
-    pages = []
-    for batch in page_batches(by_group(labels) if grouped else labels, len(slots), grouped):
-        mask = None
-        if grouped:
-            placed = [Placed(label_corners(slot, label_size.width, label_size.height), label.groups)
-                      for slot, label in zip(slots, batch)]
-            mask = outline_mask(placed, PAGE_SIZE_MM)
-        drawings = [(slot, label_drawing(label)) for slot, label in zip(slots, batch)]
-        pages.append((sheet_content(drawings, outline, mask is not None), mask))
-    return pages, len(slots)
+def sheet_box():
+    return SHEET_MARGIN_MM, SHEET_MARGIN_MM, PAGE_SIZE_MM[0] - SHEET_MARGIN_MM, PAGE_SIZE_MM[1] - SHEET_MARGIN_MM
 
 
 def sheets_pdf(labels, outline, sheet="cd", grouped=False):
-    """The whole print job as PDF bytes, and one summary line per size. `grouped` orders the labels by
-    where they are and outlines each group."""
-    pages, lines = [], []
-    for size in PRINT_ORDER:
-        sized = [label for label in labels if label.size == size]
-        if not sized:
-            continue
-        size_pages_list, per_sheet = size_pages(sized, size, outline and sheet == "cd", sheet, grouped)
-        pages += size_pages_list
-        lines.append(f"  {size}: {len(sized)} labels on {len(size_pages_list)} sheet(s), {per_sheet} per sheet")
-    return (pdf_document(pages) if pages else None), lines
+    """The whole print job as PDF bytes, and a summary line. `grouped` packs every location and machine
+    into its own outlined block that opens with its name tag."""
+    roots = group_tree(labels, grouped)
+    pages = lay_out(roots, cd_areas if sheet == "cd" else lambda: [FlatArea(*sheet_box())])
+    contents = [sheet_content([(slot, entry_drawing(entry)) for slot, entry in placed], outline and sheet == "cd", outlines)
+                for placed, outlines in pages]
+    tags = sum(isinstance(entry, NameTag) for placed, _ in pages for _, entry in placed)
+    line = f"  {len(labels)} labels and {tags} name tags on {len(pages)} sheet(s)"
+    return (pdf_document(contents) if contents else None), [line]
