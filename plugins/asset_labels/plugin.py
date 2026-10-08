@@ -1,5 +1,5 @@
-"""A label printer that turns the stock items selected in InvenTree into A4 sticker sheets, CD label
-sheets or full sticker sheets: one PDF to download and print."""
+"""A label printer that turns the stock items selected in InvenTree into A4 sticker sheets, full sticker
+sheets or CD label sheets: one PDF to download and print."""
 
 from django.core.files.base import ContentFile
 from django.core.exceptions import ValidationError
@@ -60,16 +60,16 @@ def site_url(request):
     return (configured or request.build_absolute_uri("/")).rstrip("/")
 
 
-class CdLabelSheetPlugin(LabelPrintingMixin, InvenTreePlugin):
-    NAME = "CdLabelSheet"
-    SLUG = "cd-label-sheet"
-    TITLE = "Label sheets"
-    DESCRIPTION = "Prints asset labels onto A4 CD label sheets or full sticker sheets, every size on its own sheets"
+class AssetLabelsPlugin(LabelPrintingMixin, InvenTreePlugin):
+    NAME = "AssetLabels"
+    SLUG = "asset-labels"
+    TITLE = "Asset labels"
+    DESCRIPTION = "Prints asset labels onto A4 full sticker sheets or CD label sheets, grouped by where each item is"
     VERSION = "1.0.0"
     AUTHOR = "intisy"
 
     class PrintingOptionsSerializer(serializers.Serializer):
-        sheet = serializers.ChoiceField(choices=list(SHEET_TYPES.items()), default="cd", label="Sticker paper")
+        sheet = serializers.ChoiceField(choices=list(SHEET_TYPES.items()), default="full", label="Sticker paper")
         size = serializers.ChoiceField(
             choices=[(SIZE_FROM_TAG, "Each asset's own size"), *[(size, size.capitalize()) for size in LABEL_SIZES_PRINTED]],
             default=SIZE_FROM_TAG, label="Label size",
@@ -77,7 +77,7 @@ class CdLabelSheetPlugin(LabelPrintingMixin, InvenTreePlugin):
         outline = serializers.BooleanField(default=False, label="Draw the ring edges",
                                            help_text="CD label sheets only: for a test print against a sheet")
         groups = serializers.BooleanField(default=False, label="Outline groups",
-                                          help_text="Pack every location and machine into its own outlined block, opened by a name tag")
+                                          help_text="Outline every location and machine, opened by a name tag; groups go on across pages")
         installed = serializers.BooleanField(default=False, label="Include installed items",
                                              help_text="Also print everything installed in the selected items")
 
@@ -98,5 +98,5 @@ class CdLabelSheetPlugin(LabelPrintingMixin, InvenTreePlugin):
         labels = self.labels_for(items, request, options.get("size", SIZE_FROM_TAG))
         if not labels:
             raise ValidationError("None of the selected items gets a label: they need a serial number and a size other than none")
-        pdf, _ = sheets_pdf(labels, bool(options.get("outline")), options.get("sheet", "cd"), bool(options.get("groups")))
-        output.mark_complete(progress=len(items), output=ContentFile(pdf, "cd-labels.pdf"))
+        pdf, _ = sheets_pdf(labels, bool(options.get("outline")), options.get("sheet", "full"), bool(options.get("groups")))
+        output.mark_complete(progress=len(items), output=ContentFile(pdf, "asset-labels.pdf"))

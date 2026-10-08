@@ -14,11 +14,13 @@ UNTESTED_STATE = {"key": 11, "name": "UNTESTED", "label": "Untested", "color": "
 GLOBAL_SETTINGS = {"SERIAL_NUMBER_GLOBALLY_UNIQUE": True, "INVENTREE_DEFAULT_CURRENCY": "EUR",
                    "STOCK_ENFORCE_BOM_INSTALLATION": False, "ENABLE_PLUGINS_INTERFACE": True}
 PLACEMENT_FIELD = "Label placement"
-PLUGINS = ("inventory-dashboard", "cd-label-sheet")
+PLUGINS = ("inventory-dashboard", "asset-labels")
+RETIRED_PLUGINS = ("cd-label-sheet",)
 POWER_SETTING = "/api/plugins/inventory-dashboard/settings/POWER/"
 SETTING_LIMIT = 2000
-LABEL_TEMPLATE = {"name": "CD label sheet", "model_type": "stockitem", "width": 210, "height": 297,
-                  "description": "Choose it with the CD label sheet printer; that plugin lays out the page itself"}
+LABEL_TEMPLATE = {"name": "Asset labels", "model_type": "stockitem", "width": 210, "height": 297,
+                  "description": "Choose it with the Asset labels printer; that plugin lays out the page itself"}
+RETIRED_TEMPLATE_NAMES = ("CD label sheet",)
 
 
 @dataclass
@@ -99,16 +101,25 @@ def plan_plugins(client):
             raise CatalogError(f"plugin {key} is not installed; is plugins/ mounted into the server?")
         if not installed[key]["active"]:
             changes.append(Change(f"+ plugin {key} active", lambda key=key: client.patch(f"/api/plugins/{key}/activate/", {"active": True})))
+    for key in RETIRED_PLUGINS:
+        if installed.get(key, {}).get("active"):
+            changes.append(Change(f"- plugin {key} active", lambda key=key: client.patch(f"/api/plugins/{key}/activate/", {"active": False})))
     return changes
 
 
 def plan_label_template(client):
+    """A template under a retired name is renamed in place, so anything that points at it keeps working."""
     existing = client.get("/api/label/template/", model_type=LABEL_TEMPLATE["model_type"])
     if any(template["name"] == LABEL_TEMPLATE["name"] for template in existing):
         return []
+    retired = next((template for template in existing if template["name"] in RETIRED_TEMPLATE_NAMES), None)
+    if retired:
+        fields = {"name": LABEL_TEMPLATE["name"], "description": LABEL_TEMPLATE["description"]}
+        return [Change(f"~ label template {retired['name']} renamed {LABEL_TEMPLATE['name']}",
+                       lambda: client.patch(f"/api/label/template/{retired['pk']}/", fields))]
     body = b"<div>{{ item.serial }}</div>\n"
     return [Change(f"+ label template {LABEL_TEMPLATE['name']}", lambda: client.upload(
-        "/api/label/template/", "template", "cd-label-sheet.html", body, method="POST", fields=LABEL_TEMPLATE))]
+        "/api/label/template/", "template", "asset-labels.html", body, method="POST", fields=LABEL_TEMPLATE))]
 
 
 def plan_power_setting(taxonomy, client):
