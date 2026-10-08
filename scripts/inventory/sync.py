@@ -1,6 +1,7 @@
 """Makes InvenTree match catalog.toml. Every difference becomes a Change, so `check` lists exactly what
 `sync` would do."""
 
+import json
 from dataclasses import dataclass
 from typing import Callable
 
@@ -14,6 +15,8 @@ GLOBAL_SETTINGS = {"SERIAL_NUMBER_GLOBALLY_UNIQUE": True, "INVENTREE_DEFAULT_CUR
                    "STOCK_ENFORCE_BOM_INSTALLATION": False, "ENABLE_PLUGINS_INTERFACE": True}
 PLACEMENT_FIELD = "Label placement"
 PLUGINS = ("inventory-dashboard", "cd-label-sheet")
+POWER_SETTING = "/api/plugins/inventory-dashboard/settings/POWER/"
+SETTING_LIMIT = 2000
 LABEL_TEMPLATE = {"name": "CD label sheet", "model_type": "stockitem", "width": 210, "height": 297,
                   "description": "Choose it with the CD label sheet printer; that plugin lays out the page itself"}
 
@@ -45,6 +48,7 @@ def stages(taxonomy, client):
         lambda: plan_untested_state(client),
         lambda: plan_plugins(client),
         lambda: plan_label_template(client),
+        lambda: plan_power_setting(taxonomy, client),
         lambda: plan_categories(taxonomy, client),
         lambda: plan_templates(taxonomy, client),
         lambda: plan_category_links(taxonomy, client),
@@ -105,6 +109,18 @@ def plan_label_template(client):
     body = b"<div>{{ item.serial }}</div>\n"
     return [Change(f"+ label template {LABEL_TEMPLATE['name']}", lambda: client.upload(
         "/api/label/template/", "template", "cd-label-sheet.html", body, method="POST", fields=LABEL_TEMPLATE))]
+
+
+def plan_power_setting(taxonomy, client):
+    """The dashboard plugin scores with the [power] table; it cannot read the private data repo itself."""
+    if taxonomy.get("power") is None:
+        return []
+    wanted = json.dumps(taxonomy["power"], separators=(",", ":"), sort_keys=True)
+    if len(wanted) > SETTING_LIMIT:
+        raise CatalogError(f"[power] is {len(wanted)} characters as JSON; a plugin setting holds {SETTING_LIMIT}")
+    if client.get(POWER_SETTING).get("value") == wanted:
+        return []
+    return [Change("~ plugin setting POWER", lambda: client.patch(POWER_SETTING, {"value": wanted}))]
 
 
 def plan_categories(taxonomy, client):
@@ -200,7 +216,7 @@ def create_location(client, existing, location):
 def part_body(taxonomy, model, categories):
     category = categories.get(model["category"].lower())
     return {"name": model["name"], "description": part_description(taxonomy, model)[:250],
-            "keywords": part_keywords(model), "category": category["pk"] if category else None,
+            "keywords": part_keywords(taxonomy, model), "category": category["pk"] if category else None,
             "trackable": model.get("serialized", True), "component": True, "purchaseable": False, "active": True}
 
 

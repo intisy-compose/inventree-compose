@@ -69,3 +69,54 @@ export function renderLabels(target, data) {
     frame(target, stat("stickers", printed) + stat("large", counts.large ?? 0) + stat("standard", counts.standard ?? 0) +
         stat("small", counts.small ?? 0) + stat("no sticker", counts.none ?? 0) + untagged);
 }
+
+function watts(value) {
+    return value === null || value === undefined ? "-" : `${Number(value).toLocaleString("de-DE", { maximumFractionDigits: 1 })} W`;
+}
+
+function score(value) {
+    return value === null || value === undefined ? "-" : `<b>${value}</b>`;
+}
+
+function work(row) {
+    if (row.job === "compute") {
+        return `${row.cpu_mark.toLocaleString("de-DE")} CPU Mark`;
+    }
+    return row.job === "storage" ? `${row.terabytes} TB` : "-";
+}
+
+function measured(row) {
+    const reading = row.measured;
+    return reading ? `${watts(reading.idle_w)} / ${watts(reading.load_w)}` : "-";
+}
+
+function powerRows(rows) {
+    return rows.map((row) => [escape(row.name), watts(row.idle_w), watts(row.average_w), watts(row.load_w), work(row), score(row.score)]);
+}
+
+export function renderPower(target, data) {
+    const context = data?.context ?? {};
+    const headers = ["", "Idle", "Average", "Load", "Work", "Score"];
+    const machines = table(["Machine", ...headers.slice(1)], powerRows(context.machines ?? []), [1, 2, 3, 4, 5]);
+    const locations = table(["Location", ...headers.slice(1)], powerRows(context.locations ?? []), [1, 2, 3, 4, 5]);
+    frame(target, `${machines}<br>${locations}<p style="opacity: 0.7; font-size: 0.8em">Average at the server utilisation; ` +
+        `score 1 to 100 on a log scale of work per average watt, with fixed references.</p>`);
+}
+
+export function renderPowerPanel(target, data) {
+    const row = data?.context ?? {};
+    const stats = stat("idle", watts(row.idle_w)) + stat(`average at ${Math.round((row.utilisation ?? 0) * 100)}%`, watts(row.average_w)) +
+        stat("load", watts(row.load_w)) + stat("supply loss", watts(row.loss_w)) + stat("work", work(row)) +
+        stat("score", row.score ?? "-") + (row.measured ? stat("measured idle / load", measured(row)) : "");
+    const parts = (row.parts ?? []).map((part) => [`<a href="/web/stock/item/${part.pk}" style="color: inherit">${escape(part.serial)}</a>`,
+        escape(part.part), watts(part.idle_w), watts(part.load_w)]);
+    frame(target, stats + (parts.length ? table(["Asset", "Part", "Idle", "Load"], parts, [2, 3]) : ""));
+}
+
+export function renderPartPower(target, data) {
+    const context = data?.context ?? {};
+    const scored = context.score;
+    const figure = scored ? stat(scored.unit, Number(scored.figure).toLocaleString("de-DE")) + stat(`score (${scored.class})`, scored.score) : "";
+    const source = context.source ? `<p style="opacity: 0.7; font-size: 0.8em">${escape(context.source)}</p>` : "";
+    frame(target, stat("idle", watts(context.idle_w)) + stat("load", watts(context.load_w)) + figure + source);
+}
