@@ -104,11 +104,14 @@ function Connect-Tailnet {
 
 # INVENTREE_AUTO_UPDATE migrates the database but leaves the static files of a fresh volume
 # uncollected, which serves the web UI without its assets.
+# A restart does not copy the plugins' static files, so the browser kept an old dashboard.js; collect them every time.
 function Initialize-StaticFiles {
     $count = docker compose @composeArgs exec -T server sh -c "ls /home/inventree/data/static 2>/dev/null | wc -l"
-    if ([int]"$count".Trim() -gt 0) { return }
-    Write-Step "Collecting static files..."
-    docker compose @composeArgs exec -T server invoke static | Out-Null
+    if ([int]"$count".Trim() -eq 0) {
+        Write-Step "Collecting static files..."
+        docker compose @composeArgs exec -T server invoke static | Out-Null
+    }
+    docker compose @composeArgs exec -T server sh -c "cd /home/inventree/src/backend/InvenTree && python manage.py collectplugins" | Out-Null
 }
 
 function Show-Urls {
@@ -192,7 +195,7 @@ switch ($Command.ToLower()) {
     "init-config" { Initialize-Config; break }
     "up"      { Assert-Config; Connect-Tailnet; Write-Step "Starting InvenTree..."; docker compose @composeArgs up -d; if ($LASTEXITCODE -eq 0) { Initialize-StaticFiles; Show-Urls }; break }
     "down"    { Write-Step "Stopping everything..."; docker compose @composeArgs down; break }
-    "restart" { Assert-Config; Connect-Tailnet; Write-Step "Recreating..."; docker compose @composeArgs up -d --force-recreate; Show-Urls; break }
+    "restart" { Assert-Config; Connect-Tailnet; Write-Step "Recreating..."; docker compose @composeArgs up -d --force-recreate; if ($LASTEXITCODE -eq 0) { Initialize-StaticFiles }; Show-Urls; break }
     "url"     { Show-Urls; break }
     "status"  { docker compose @composeArgs ps -a; break }
     "logs"    { docker compose @composeArgs logs -f @forwarded; break }
