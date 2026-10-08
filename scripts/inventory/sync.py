@@ -199,10 +199,16 @@ def plan_locations(taxonomy, client):
         if current is None:
             changes.append(Change(f"+ location {location['name']}", lambda location=location: create_location(client, existing, location)))
         elif (current["name"], current["description"], current["parent"]) != wanted:
-            body = dict(zip(("name", "description", "parent"), wanted))
             changes.append(Change(f"~ location {location['name']}",
-                                  lambda pk=current["pk"], body=body: client.patch(f"/api/stock/location/{pk}/", body)))
+                                  lambda pk=current["pk"], location=location: update_location(client, existing, pk, location)))
     return changes
+
+
+def update_location(client, existing, pk, location):
+    """Resolves the parent when applied, so a location can move under one this same pass just created."""
+    parent = existing.get(str(location.get("parent", "")).lower())
+    body = {"name": location["name"], "description": location.get("description", ""), "parent": parent["pk"] if parent else None}
+    client.patch(f"/api/stock/location/{pk}/", body)
 
 
 def create_location(client, existing, location):

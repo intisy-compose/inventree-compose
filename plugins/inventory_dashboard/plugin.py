@@ -159,7 +159,7 @@ class InventoryDashboardPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugi
             return []
         found = power.totals([host, *parts], inventory.parameters_of)
         data = power.summary(f"{host.serial} {host.part}", found, config, power.utilisation_of(host.serial, config),
-                             power.measured_of(host.serial, config))
+                             power.measured_of(host.serial, config), power.on_share_of(host.serial, config))
         return [self.panel("power", "Power", "renderPowerPanel", data)] if data["average_w"] > 0 else []
 
     def location_panel(self, inventory, config, pk):
@@ -167,7 +167,8 @@ class InventoryDashboardPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugi
         powered = power.powered_assets(inventory, config)
         below = [asset for asset in inventory.location_and_below(pk) if asset.pk in powered]
         found = power.totals(below, inventory.parameters_of)
-        data = power.summary(name, found, config, power.utilisation_of(name, config), power.measured_of(name, config))
+        data = power.summary(name, found, config, power.utilisation_of(name, config), power.measured_of(name, config),
+                             power.on_share_of(name, config))
         return [self.panel("power", "Power", "renderPowerPanel", data)] if data["average_w"] > 0 else []
 
     def part_panel(self, inventory, config, pk):

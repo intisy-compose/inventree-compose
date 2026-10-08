@@ -129,8 +129,9 @@ def validate_power(taxonomy):
     for name in [*power.get("machine_locations", []), *power.get("group_locations", [])]:
         require(taxonomy, "locations", name, "[power]")
     for name, machine in power.get("machines", {}).items():
-        if "utilisation" in machine and not 0 < machine["utilisation"] <= 1:
-            raise CatalogError(f"[power] machine '{name}': utilisation must be a fraction between 0 and 1")
+        for key in ("utilisation", "on_share"):
+            if key in machine and not 0 < machine[key] <= 1:
+                raise CatalogError(f"[power] machine '{name}': {key} must be a fraction between 0 and 1")
 
 
 def validate_render(model, context):
