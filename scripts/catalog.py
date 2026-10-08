@@ -9,9 +9,9 @@ assets from batch files validated against it first. Run through the CLI:
 import argparse
 import sys
 
-from inventory import assets, images, labels, sync
+from inventory import assets, images, sync
 from inventory.api import ApiError
-from inventory.settings import LABELS_PATH, connect, read_config, site_url
+from inventory.settings import connect
 from inventory.taxonomy import CatalogError, load_catalog, load_toml
 
 
@@ -22,15 +22,6 @@ def batch_from(path):
     if not batch:
         raise CatalogError(f"{path} has no [[assets]] entries")
     return batch
-
-
-def print_labels(client, arguments):
-    wanted = [part.strip() for part in arguments.ids.split(",")] if arguments.ids else []
-    chosen, unlabelled = assets.collect_labels(client, site_url(read_config()), wanted)
-    lines = labels.write_sheets(chosen, arguments.file or LABELS_PATH, arguments.outline)
-    if unlabelled:
-        lines.append(f"  none: {len(unlabelled)} assets get no label: {', '.join(unlabelled)}")
-    return lines
 
 
 def run(arguments):
@@ -49,20 +40,16 @@ def run(arguments):
         lines = assets.add_assets(batch_from(arguments.file), taxonomy, client)
     elif command == "update":
         lines = assets.update_assets(batch_from(arguments.file), taxonomy, client)
-    elif command == "list":
-        lines = assets.list_assets(client)
     else:
-        lines = print_labels(client, arguments)
+        lines = assets.list_assets(client)
     print("\n".join(lines) if lines else "nothing to do")
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser(prog="docker-compose.ps1 catalog")
-    parser.add_argument("command", choices=["check", "sync", "add", "update", "list", "images", "labels"])
-    parser.add_argument("file", nargs="?", help="batch file for add / update, PDF to write for labels")
-    parser.add_argument("--ids", help="labels: only these assets, comma separated, e.g. SAM-0001,SAM-0007")
-    parser.add_argument("--outline", action="store_true", help="labels: also draw the ring edges, for a test print")
+    parser.add_argument("command", choices=["check", "sync", "add", "update", "list", "images"])
+    parser.add_argument("file", nargs="?", help="batch file for add / update")
     try:
         return run(parser.parse_args())
     except (CatalogError, ApiError) as error:

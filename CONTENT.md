@@ -47,15 +47,13 @@ drift into "Electronics" and half a dozen spellings of the same thing:
 - `catalog add <batch.toml>` and `update <batch.toml>` create or change assets: serialized stock
   items whose serial number is the asset ID (`SAM-0001`). The whole batch is validated before
   anything is written. A part inside a computer or enclosure is installed in that item.
-- `catalog labels` prints labels onto A4 CD label sheets: large (QR code, ID and name), standard
-  (QR code and ID) or small (ID only), around both rings, inside the centre discs and on the sheet
-  around them, to be cut apart. Each asset carries its size as a tag; scanning the QR code opens
-  the item.
+- Each asset carries its label size as a tag: large (QR code, ID and name), standard (QR code and
+  ID), small (ID only) or none. Labels are printed from InvenTree itself (below).
 - `scripts/import_shelf.py` moved an inventory over from
   [shelf-compose](https://github.com/intisy-compose/shelf-compose), keeping every asset ID.
 
 It needs Python 3.11 or newer on the host, with [Pillow](https://pypi.org/project/pillow/) for
-images and [qrcode](https://pypi.org/project/qrcode/) for QR codes. The public data template ships a
+images. The public data template ships a
 starter `catalog.toml`; `CATALOG.md` in a data repo documents the rules.
 
 ## Dashboard
@@ -68,9 +66,11 @@ activates it; add the widgets from the dashboard menu.
 
 ## Printing labels from InvenTree
 
-`plugins/cd_label_sheet` is a label printer plugin with the same layout as `catalog labels`: select
-stock items in InvenTree (by category, location, search or one by one), choose Print labels, the
-`CD label sheet` template and the `CD label sheet` printer, and the sheet PDF downloads. `catalog
+`plugins/cd_label_sheet` is a label printer plugin, the only way labels are printed: select stock
+items in InvenTree (by category, location, search or one by one), choose Print labels, the `CD
+label sheet` template and the `Label sheets` printer, pick the sticker paper (A4 CD label sheets,
+labels around the rings, in the centre discs and around them; or full A4 sticker sheets, on a
+grid), and the PDF downloads. `catalog
 sync` activates both plugins and creates the template.
 
 ## Data and backups

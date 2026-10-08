@@ -2,7 +2,6 @@
 
 import re
 
-from .labels import Label
 from .sync import UNTESTED_STATE, by_name, tags_by_pk
 from .taxonomy import LABEL_SIZES, CatalogError, label_size, require
 
@@ -176,19 +175,3 @@ def list_assets(client):
         lines.append(f"{asset_id}  {item['part_detail']['name']}\n    {where}  {item.get('status_text')}  "
                      f"value {item.get('purchase_price') or '-'}  label {item_label_size(item)}")
     return lines
-
-
-def collect_labels(client, site, wanted_ids):
-    items = remote_items(client)
-    missing = [asset_id for asset_id in wanted_ids if asset_id not in items]
-    if missing:
-        raise CatalogError(f"no such asset: {', '.join(missing)}")
-    chosen = [items[asset_id] for asset_id in wanted_ids] if wanted_ids else [items[key] for key in sorted(items)]
-    labels, unlabelled = [], []
-    for item in chosen:
-        size = item_label_size(item) or "standard"
-        if size == "none":
-            unlabelled.append(item["serial"])
-            continue
-        labels.append(Label(item["serial"], item["part_detail"]["name"], f"{site}/web/stock/item/{item['pk']}", size))
-    return labels, unlabelled
