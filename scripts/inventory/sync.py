@@ -4,7 +4,7 @@
 from dataclasses import dataclass
 from typing import Callable
 
-from .taxonomy import CatalogError
+from .taxonomy import CatalogError, label_placement, part_description, part_keywords
 
 
 UNTESTED_STATE = {"key": 11, "name": "UNTESTED", "label": "Untested", "color": "secondary", "logical_key": 10,
@@ -12,6 +12,7 @@ UNTESTED_STATE = {"key": 11, "name": "UNTESTED", "label": "Untested", "color": "
 # A computer's parts are installed in it without the computer being an assembly with a bill of materials.
 GLOBAL_SETTINGS = {"SERIAL_NUMBER_GLOBALLY_UNIQUE": True, "INVENTREE_DEFAULT_CURRENCY": "EUR",
                    "STOCK_ENFORCE_BOM_INSTALLATION": False, "ENABLE_PLUGINS_INTERFACE": True}
+PLACEMENT_FIELD = "Label placement"
 PLUGINS = ("inventory-dashboard", "cd-label-sheet")
 LABEL_TEMPLATE = {"name": "CD label sheet", "model_type": "stockitem", "width": 210, "height": 297,
                   "description": "Choose it with the CD label sheet printer; that plugin lays out the page itself"}
@@ -196,11 +197,11 @@ def create_location(client, existing, location):
     existing[created["name"].lower()] = created
 
 
-def part_body(model, categories):
+def part_body(taxonomy, model, categories):
     category = categories.get(model["category"].lower())
-    return {"name": model["name"], "description": model.get("description", "")[:250],
-            "category": category["pk"] if category else None,
-            "trackable": True, "component": True, "purchaseable": False, "active": True}
+    return {"name": model["name"], "description": part_description(taxonomy, model)[:250],
+            "keywords": part_keywords(model), "category": category["pk"] if category else None,
+            "trackable": model.get("serialized", True), "component": True, "purchaseable": False, "active": True}
 
 
 def plan_parts(taxonomy, client):
@@ -209,13 +210,13 @@ def plan_parts(taxonomy, client):
     part_tags = tags_by_pk(client, "/api/part/", [tag["name"] for tag in taxonomy["tags"].values()])
     changes = []
     for key, model in taxonomy["models"].items():
-        body = part_body(model, categories)
+        body = part_body(taxonomy, model, categories)
         tags = sorted(model.get("tags", []))
         current = parts.get(key)
         if current is None:
             changes.append(Change(f"+ model {model['name']}", lambda body=body, tags=tags: client.post("/api/part/", {**body, "tags": tags})))
             continue
-        differing = [name for name in ("description", "category") if current.get(name) != body[name]]
+        differing = [name for name in ("description", "keywords", "category", "trackable") if (current.get(name) or "") != (body[name] or "")]
         if sorted(part_tags.get(current["pk"], set())) != tags:
             differing.append("tags")
         if differing:
@@ -232,6 +233,11 @@ def parameter_text(value):
     return str(value)
 
 
+def model_parameters(taxonomy, model):
+    """The model's fields plus the ones the tool generates for every model."""
+    return {**model.get("fields", {}), PLACEMENT_FIELD: label_placement(taxonomy, model)}
+
+
 def plan_parameters(taxonomy, client):
     parts = by_name(client.get("/api/part/"))
     templates = by_name(client.get("/api/parameter/template/"))
@@ -243,8 +249,10 @@ def plan_parameters(taxonomy, client):
         part = parts.get(key)
         if part is None:
             continue
-        for name, value in model.get("fields", {}).items():
-            template = templates[name.lower()]
+        for name, value in model_parameters(taxonomy, model).items():
+            template = templates.get(name.lower())
+            if template is None:
+                continue
             text = parameter_text(value)
             current = existing.pop((part["pk"], template["pk"]), None)
             body = {"template": template["pk"], "model_type": "part.part", "model_id": part["pk"], "data": text}

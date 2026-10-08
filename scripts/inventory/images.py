@@ -57,6 +57,9 @@ def apply_model_images(taxonomy, client, only_missing):
             continue
         if only_missing and part.get("image"):
             continue
+        if not os.path.isfile(path):
+            lines.append(f"! model not rendered yet, run catalog previews: {model['name']}")
+            continue
         name = os.path.splitext(os.path.basename(path))[0] + ".jpg"
         client.upload(f"/api/part/{part['pk']}/", "image", name, jpeg_bytes(product_image(path)))
         lines.append(f"~ {model['name']}: image from data/{model['image']}")

@@ -2,17 +2,20 @@
 
 import re
 
-from .sync import UNTESTED_STATE, by_name, tags_by_pk
+from .sync import UNTESTED_STATE, Change, by_name, tags_by_pk
 from .taxonomy import LABEL_SIZES, CatalogError, label_size, require
 
-ASSET_KEYS = {"id", "model", "location", "installed_in", "condition", "value", "description", "label"}
+ASSET_KEYS = {"id", "model", "location", "installed_in", "condition", "value", "description", "label", "quantity"}
 ASSET_ID = re.compile(r"^SAM-\d{4,}$")
 CONDITIONS = {"Tested working": 10, "Untested": UNTESTED_STATE["key"], "Needs repair": 50, "Broken": 55}
 LABEL_TAG = "label-"
+# Marks an asset whose label size was set on the asset itself, so sync leaves it alone. It must not start
+# with LABEL_TAG, which the label printer reads as a size.
+OWN_LABEL_TAG = "own-label"
 
 
 def remote_items(client):
-    label_tags = tags_by_pk(client, "/api/stock/", [LABEL_TAG + size for size in LABEL_SIZES])
+    label_tags = tags_by_pk(client, "/api/stock/", [LABEL_TAG + size for size in LABEL_SIZES] + [OWN_LABEL_TAG])
     items = {}
     for item in client.get("/api/stock/", part_detail="true"):
         if item.get("serial"):
@@ -87,35 +90,59 @@ def item_body(entry, parts, locations, items):
     return body
 
 
-def label_tag(taxonomy, entry, current_model_name):
+def label_tags(taxonomy, entry, current_model_name):
     model = require(taxonomy, "models", entry.get("model", current_model_name), f"asset {entry.get('id')}")
-    return LABEL_TAG + label_size(taxonomy, model, entry.get("label"))
+    tags = [LABEL_TAG + label_size(taxonomy, model, entry.get("label"))]
+    return tags + [OWN_LABEL_TAG] if entry.get("label") else tags
+
+
+def is_stock(entry):
+    """A quantity of identical small parts, one stock item without a serial number or a label."""
+    return "quantity" in entry
 
 
 def add_assets(batch, taxonomy, client):
     """Creating an item ignores its tags, so the label tag is set right after."""
     items = remote_items(client)
-    known = set(items) | {entry["id"] for entry in batch if "id" in entry}
-    fresh = iter(next_ids(known, sum("id" not in entry for entry in batch)))
-    for entry in batch:
+    assets = [entry for entry in batch if not is_stock(entry)]
+    known = set(items) | {entry["id"] for entry in assets if "id" in entry}
+    fresh = iter(next_ids(known, sum("id" not in entry for entry in assets)))
+    for entry in assets:
         if "id" not in entry:
             entry["id"] = next(fresh)
         if entry["id"] in items:
             raise CatalogError(f"asset {entry['id']} already exists; use update")
-    known = set(items) | {entry["id"] for entry in batch}
+    known = set(items) | {entry["id"] for entry in assets}
     for entry in batch:
         validate_entry(entry, taxonomy, known, adding=True)
+        validate_serialization(entry, taxonomy)
     parts = by_name(client.get("/api/part/"))
     locations = by_name(client.get("/api/stock/location/"))
     lines = []
-    for entry in hosts_first(batch):
+    for entry in hosts_first(assets):
         body = {**item_body(entry, parts, locations, items), "quantity": 1, "serial_numbers": entry["id"]}
         created = client.post("/api/stock/", body)
         item = created[0] if isinstance(created, list) else created
-        client.patch(f"/api/stock/{item['pk']}/", {"tags": [label_tag(taxonomy, entry, None)]})
+        client.patch(f"/api/stock/{item['pk']}/", {"tags": label_tags(taxonomy, entry, None)})
         items[entry["id"]] = item
         lines.append(f"+ {entry['id']} {entry['model']}")
+    for entry in batch:
+        if is_stock(entry):
+            client.post("/api/stock/", {**item_body(entry, parts, locations, items), "quantity": entry["quantity"]})
+            lines.append(f"+ {entry['quantity']} x {entry['model']}")
     return lines
+
+
+def validate_serialization(entry, taxonomy):
+    model = require(taxonomy, "models", entry["model"], f"asset {entry.get('id', entry['model'])}")
+    serialized = model.get("serialized", True)
+    if is_stock(entry) == serialized:
+        kind = "an asset with an id" if serialized else "stock with a quantity"
+        raise CatalogError(f"{entry['model']}: this model is filed as {kind}")
+    if is_stock(entry) and (isinstance(entry["quantity"], bool) or not isinstance(entry["quantity"], int) or entry["quantity"] < 1):
+        raise CatalogError(f"{entry['model']}: quantity must be a whole number above 0")
+    if is_stock(entry) and ("id" in entry or "label" in entry or "installed_in" in entry):
+        raise CatalogError(f"{entry['model']}: stock has no id, label or installed_in")
 
 
 def update_assets(batch, taxonomy, client):
@@ -134,7 +161,7 @@ def update_assets(batch, taxonomy, client):
         body = item_body(entry, parts, locations, items)
         move_item(client, item, entry, body, items)
         if "label" in entry:
-            body["tags"] = [label_tag(taxonomy, entry, item["part_detail"]["name"])]
+            body["tags"] = label_tags(taxonomy, entry, item["part_detail"]["name"])
         client.patch(f"/api/stock/{item['pk']}/", body)
         lines.append(f"~ {entry['id']} {item['part_detail']['name']}: {', '.join(sorted(set(entry) - {'id'}))}")
     return lines
@@ -148,6 +175,20 @@ def move_item(client, item, entry, body, items):
         client.post(f"/api/stock/{items[entry['installed_in']]['pk']}/install/", {"stock_item": item["pk"], "quantity": 1, "note": "catalog update"})
     elif "location" in entry and item.get("belongs_to"):
         client.post(f"/api/stock/{item['pk']}/uninstall/", {"location": body.pop("location"), "note": "catalog update"})
+
+
+def plan_label_tags(taxonomy, client):
+    """Brings every asset's label tag in line with its model and category, unless the asset set its own."""
+    changes = []
+    for asset_id, item in sorted(remote_items(client).items()):
+        model = taxonomy["models"].get(item["part_detail"]["name"].lower())
+        if model is None or OWN_LABEL_TAG in item["tags"]:
+            continue
+        wanted = label_size(taxonomy, model)
+        if item_label_size(item) != wanted:
+            changes.append(Change(f"~ {asset_id} {model['name']}: label {item_label_size(item)} -> {wanted}",
+                                  lambda pk=item["pk"], wanted=wanted: client.patch(f"/api/stock/{pk}/", {"tags": [LABEL_TAG + wanted]})))
+    return changes
 
 
 def item_label_size(item):
