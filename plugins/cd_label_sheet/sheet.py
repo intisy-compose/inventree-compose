@@ -9,9 +9,9 @@ from dataclasses import dataclass
 PAGE_SIZE_MM = (210, 297)
 # Calibrated for the human partner's printer, paper pushed against the tray guide: see RULES.md in compose/docs.
 PRINT_SCALE = 0.975
-RING_CENTRES_MM = ((105.8, 72.1), (105.8, 224.3))
-RING_OUTER_RADIUS_MM = 58.5 / PRINT_SCALE
-RING_HOLE_RADIUS_MM = 20.5 / PRINT_SCALE
+RING_CENTRES_MM = ((104.9, 72.1), (104.9, 224.3))
+RING_OUTER_RADIUS_MM = 58.0 / PRINT_SCALE
+RING_HOLE_RADIUS_MM = 20.32 / PRINT_SCALE
 RING_SAFETY_MM = 2.5
 SHEET_MARGIN_MM = 8.0
 LABEL_GAP_MM = 1.0
