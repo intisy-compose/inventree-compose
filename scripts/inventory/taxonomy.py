@@ -33,6 +33,9 @@ def load_catalog(path=CATALOG_PATH):
     validate_locations(taxonomy)
     for model in taxonomy["models"].values():
         validate_model(taxonomy, model)
+    taxonomy["power"] = raw.get("power")
+    if taxonomy["power"] is not None:
+        validate_power(taxonomy)
     return taxonomy
 
 
@@ -105,6 +108,29 @@ def validate_model(taxonomy, model):
     for field in fields_of(taxonomy, category):
         if field.get("required") and field["name"] not in values:
             raise CatalogError(f"{context}: required field '{field['name']}' is missing")
+
+
+def validate_reference(reference, context):
+    if not (isinstance(reference, dict) and 0 < reference.get("low", 0) < reference.get("high", 0)):
+        raise CatalogError(f"{context}: needs low and high efficiencies with 0 < low < high")
+
+
+def validate_power(taxonomy):
+    """The [power] table the dashboard plugin scores with; see CATALOG.md, Power and efficiency."""
+    power = taxonomy["power"]
+    if not 0 < power.get("utilisation", 0) <= 1:
+        raise CatalogError("[power]: utilisation must be a fraction between 0 and 1")
+    for power_class in power.get("classes", []):
+        validate_reference(power_class, f"[power] class '{power_class.get('name')}'")
+        if power_class.get("figure") != "TB":
+            require(taxonomy, "fields", power_class.get("figure"), f"[power] class '{power_class.get('name')}'")
+    for job in ("compute", "storage"):
+        validate_reference(power.get("references", {}).get(job), f"[power] references.{job}")
+    for name in [*power.get("machine_locations", []), *power.get("group_locations", [])]:
+        require(taxonomy, "locations", name, "[power]")
+    for name, machine in power.get("machines", {}).items():
+        if "utilisation" in machine and not 0 < machine["utilisation"] <= 1:
+            raise CatalogError(f"[power] machine '{name}': utilisation must be a fraction between 0 and 1")
 
 
 def validate_render(model, context):
@@ -225,11 +251,12 @@ def part_description(taxonomy, model):
     return text[:1].upper() + text[1:]
 
 
-def part_keywords(model):
-    """InvenTree's search covers keywords but not parameters, so every field value goes in here."""
+def part_keywords(taxonomy, model):
+    """InvenTree's search covers keywords but not parameters, so every field value goes in here, except
+    fields marked `keyword = false` (sources and watts, which nobody searches for)."""
     words = []
-    for value in model.get("fields", {}).values():
-        if not isinstance(value, bool):
+    for name, value in model.get("fields", {}).items():
+        if not isinstance(value, bool) and taxonomy["fields"][name.lower()].get("keyword", True):
             text = value_text(value, None)
             if text not in words:
                 words.append(text)

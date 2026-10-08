@@ -1,10 +1,14 @@
 """Dashboard widgets for a personal hardware inventory kept by the catalog tool: assets are serialized
 stock items, conditions are stock statuses, label sizes are `label-*` tags."""
 
+import json
+
 from django.db.models import Count, Q, Sum
 
 from plugin import InvenTreePlugin
-from plugin.mixins import UserInterfaceMixin
+from plugin.mixins import SettingsMixin, UserInterfaceMixin
+
+from . import power
 
 CONDITIONS = {11: "Untested", 50: "Needs repair", 55: "Broken"}
 LABEL_SIZES = ("large", "standard", "small", "none")
@@ -66,13 +70,44 @@ def labels():
     return {"counts": counts, "untagged": items.count() - sum(counts.values())}
 
 
-class InventoryDashboardPlugin(UserInterfaceMixin, InvenTreePlugin):
+def power_inventory():
+    from common.models import Parameter
+    from stock.models import StockLocation
+
+    rows = assets().values("pk", "serial", "part__pk", "part__name", "part__category__name", "location_id", "belongs_to_id")
+    part_names = {row["part__pk"]: row["part__name"] for row in rows}
+    parameters = {}
+    for row in Parameter.objects.filter(model_type__model="part", model_id__in=part_names).values("model_id", "template__name", "data"):
+        parameters.setdefault(part_names[row["model_id"]], {})[row["template__name"]] = row["data"]
+    locations = {row["pk"]: {"name": row["name"], "parent": row["parent_id"], "pathstring": row["pathstring"]}
+                 for row in StockLocation.objects.values("pk", "name", "parent_id", "pathstring")}
+    inventory_assets = [power.Asset(row["serial"], row["pk"], row["part__name"], row["part__category__name"] or "",
+                                    row["location_id"], row["belongs_to_id"]) for row in rows]
+    return power.Inventory(inventory_assets, locations, parameters)
+
+
+class InventoryDashboardPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
     NAME = "InventoryDashboard"
     SLUG = "inventory-dashboard"
     TITLE = "Inventory dashboard"
     DESCRIPTION = "Dashboard widgets for a hardware inventory kept by the inventree-compose catalog tool"
     VERSION = "1.0.0"
     AUTHOR = "intisy"
+
+    SETTINGS = {
+        "POWER": {
+            "name": "Power settings",
+            "description": "Utilisation, reference points and machines as JSON, written by the catalog tool from catalog.toml; edit it there",
+            "default": "",
+        },
+    }
+
+    def power_config(self):
+        """None until the catalog tool has written the settings, so nothing is scored on made-up numbers."""
+        try:
+            return json.loads(self.get_setting("POWER") or "null")
+        except ValueError:
+            return None
 
     def widget(self, key, title, description, function, data, width=4, height=3):
         return {"key": key, "title": title, "description": description,
@@ -86,4 +121,66 @@ class InventoryDashboardPlugin(UserInterfaceMixin, InvenTreePlugin):
             self.widget("machines", "Machines", "Parts installed in each machine, and items per location", "renderMachines", machines()),
             self.widget("recent", "Recently added", "The newest assets", "renderRecent", recent()),
             self.widget("labels", "Labels", "Sticker sizes to print", "renderLabels", labels(), width=3, height=2),
+            *self.power_widgets(),
         ]
+
+    def power_widgets(self):
+        config = self.power_config()
+        if config is None:
+            return []
+        inventory = power_inventory()
+        data = {"machines": [{**row, "parts": []} for row in power.machine_summaries(inventory, config)],
+                "locations": power.location_summaries(inventory, config)}
+        return [self.widget("power", "Power and efficiency", "Watts and score of every machine and location", "renderPower",
+                            data, width=8, height=5)]
+
+    def panel(self, key, title, function, data):
+        return {"key": key, "title": title, "description": title, "icon": "ti:bolt:outline",
+                "source": self.plugin_static_file(f"dashboard.js:{function}"), "context": data}
+
+    def get_ui_panels(self, request, context, **kwargs):
+        config = self.power_config()
+        target, pk = context.get("target_model"), context.get("target_id")
+        if config is None or pk is None:
+            return []
+        inventory = power_inventory()
+        if target == "stockitem":
+            return self.machine_panel(inventory, config, int(pk))
+        if target == "stocklocation":
+            return self.location_panel(inventory, config, int(pk))
+        if target == "part":
+            return self.part_panel(inventory, config, int(pk))
+        return []
+
+    def machine_panel(self, inventory, config, pk):
+        host = inventory.by_pk.get(pk)
+        parts = inventory.installed_in(host) if host else []
+        if not parts:
+            return []
+        found = power.totals([host, *parts], inventory.parameters_of)
+        data = power.summary(f"{host.serial} {host.part}", found, config, power.utilisation_of(host.serial, config),
+                             power.measured_of(host.serial, config))
+        return [self.panel("power", "Power", "renderPowerPanel", data)] if data["average_w"] > 0 else []
+
+    def location_panel(self, inventory, config, pk):
+        name = inventory.locations.get(pk, {}).get("name", "")
+        powered = power.powered_assets(inventory, config)
+        below = [asset for asset in inventory.location_and_below(pk) if asset.pk in powered]
+        found = power.totals(below, inventory.parameters_of)
+        data = power.summary(name, found, config, power.utilisation_of(name, config), power.measured_of(name, config))
+        return [self.panel("power", "Power", "renderPowerPanel", data)] if data["average_w"] > 0 else []
+
+    def part_panel(self, inventory, config, pk):
+        from part.models import Part
+
+        part = Part.objects.filter(pk=pk).select_related("category").first()
+        if part is None:
+            return []
+        asset = power.Asset("", 0, part.name, part.category.name if part.category else "", None, None)
+        parameters = inventory.parameters_of(part.name)
+        score = power.part_score(asset, parameters, config)
+        idle, load = power.number(parameters, power.IDLE), power.number(parameters, power.LOAD)
+        if score is None and idle is None:
+            return []
+        data = {"idle_w": idle, "load_w": load, "score": score, "source": parameters.get("Power source", "")}
+        return [self.panel("power", "Power", "renderPartPower", data)]
