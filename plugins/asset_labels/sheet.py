@@ -1,13 +1,13 @@
 """Lays asset labels and group name tags out on A4 sticker sheets, to be cut apart after printing. Sizes
-mix on one page. On a CD label sheet labels sit radially around each ring, upright inside each centre
-disc and upright on the sheet around the rings; on a full sticker sheet they fill the page. With groups
-on, labels follow where their items are, each group opens with its name tag, gaps grow between groups
-and outlines run around them in the gaps."""
+mix on one page. On a full sticker sheet labels fill the page; on a CD label sheet they sit radially around
+each ring, upright inside each centre disc and upright on the sheet around the rings. With groups on, labels
+follow where their items are, each group opens with its name tag, and nested outlines run around every
+group, across pages when a group continues."""
 
 import math
 from dataclasses import dataclass, field
 
-from .layout import FlatArea, Group, RingArea, lay_out
+from .layout import FlatArea, FlowItem, RingArea, lay_out
 from .outlines import outline_operators
 
 PAGE_SIZE_MM = (210, 297)
@@ -18,7 +18,7 @@ RING_OUTER_RADIUS_MM = 58.0 / PRINT_SCALE
 RING_HOLE_RADIUS_MM = 20.32 / PRINT_SCALE
 RING_SAFETY_MM = 2.0
 SHEET_MARGIN_MM = 8.0
-SHEET_TYPES = {"cd": "CD label sheet", "full": "Full sticker sheet"}
+SHEET_TYPES = {"full": "Full sticker sheet", "cd": "CD label sheet"}
 PADDING_MM = 0.6
 QR_QUIET_MODULES = 2
 LABEL_SIZES_PRINTED = ("large", "standard", "small")
@@ -26,7 +26,8 @@ SIZE_RANK = {size: rank for rank, size in enumerate(LABEL_SIZES_PRINTED)}
 TAG_NAME_TEXT_MM = 2.2
 TAG_CONTENT_TEXT_MM = 1.6
 TAG_MIN_WIDTH_MM = 12.0
-TAG_MAX_WIDTH_MM = 33.0
+TAG_MAX_WIDTH_MM = {"full": 60.0, "cd": 33.0}
+CONTINUED = " (continued)"
 BOLD_WIDENING = 1.07
 
 HELVETICA_BOLD = {"S": 667, "A": 722, "M": 833, "-": 333, **{digit: 556 for digit in "0123456789"}}
@@ -75,23 +76,33 @@ class Label:
 
 
 @dataclass
-class NameTag:
-    """A group's name at the start of its labels, and for a machine the IDs installed directly in it."""
+class Group:
+    key: str
     name: str
     contents: tuple
-    groups: tuple
+    tag: object = None
+    labels: list = field(default_factory=list)
+    children: list = field(default_factory=list)
+
+
+@dataclass
+class NameTag:
+    """A group's name at the start of its labels, and for a machine every ID installed directly in it."""
+    name: str
+    contents: tuple
+    max_width: float
     name_lines: list = field(init=False)
     content_lines: list = field(init=False)
     width: float = field(init=False)
     height: float = field(init=False)
 
     def __post_init__(self):
-        room = TAG_MAX_WIDTH_MM - 2 * PADDING_MM
-        self.name_lines = wrap(self.name, TAG_NAME_TEXT_MM * BOLD_WIDENING, room, 2)
-        self.content_lines = wrap(" ".join(self.contents), TAG_CONTENT_TEXT_MM, room, 4) if self.contents else []
+        room = self.max_width - 2 * PADDING_MM
+        self.name_lines = wrap(self.name, TAG_NAME_TEXT_MM * BOLD_WIDENING, room, 4)
+        self.content_lines = wrap(" ".join(self.contents), TAG_CONTENT_TEXT_MM, room, 50) if self.contents else []
         widest = max([bold_width(line, TAG_NAME_TEXT_MM) for line in self.name_lines] +
                      [text_width(line, TAG_CONTENT_TEXT_MM, HELVETICA) for line in self.content_lines])
-        self.width = min(TAG_MAX_WIDTH_MM, max(TAG_MIN_WIDTH_MM, widest + 2 * PADDING_MM))
+        self.width = min(self.max_width, max(TAG_MIN_WIDTH_MM, widest + 2 * PADDING_MM))
         self.height = (2 * PADDING_MM + len(self.name_lines) * TAG_NAME_TEXT_MM * 1.15
                        + (0.3 + len(self.content_lines) * TAG_CONTENT_TEXT_MM * 1.2 if self.content_lines else 0))
 
@@ -251,21 +262,20 @@ def pdf_document(pages):
     return output
 
 
-def group_tree(labels, grouped):
-    """The top-level labels and groups in order. With groups on, every location and every item with parts
-    in it is a group that opens with its name tag; labels sit in their innermost group, largest first."""
-    def label_order(label):
-        return SIZE_RANK[label.size], label.asset_id
+def label_order(label):
+    return SIZE_RANK[label.size], label.asset_id
 
-    if not grouped:
-        return sorted((Label(label.asset_id, label.name, label.url, label.size) for label in labels), key=label_order)
+
+def group_tree(labels, tag_width):
+    """Every location and every item with parts in it is a group that opens with its name tag; labels sit in
+    their innermost group, largest first."""
     root = Group("", "", ())
     for label in labels:
         node = root
         for depth, (key, name, contents) in enumerate(label.groups):
             child = next((group for group in node.children if group.key == key), None)
             if child is None:
-                child = Group(key, name, contents, NameTag(name, contents, label.groups[:depth + 1]))
+                child = Group(key, name, contents, NameTag(name, contents, tag_width))
                 node.children.append(child)
             node = child
         node.labels.append(label)
@@ -277,7 +287,37 @@ def group_tree(labels, grouped):
             order(child)
 
     order(root)
-    return root.labels + root.children
+    return root
+
+
+def flow_sequence(labels, grouped, tag_width):
+    """The labels and name tags in flow order: the group tree depth first, each group its name tag, its own
+    labels, then its subgroups."""
+    if not grouped:
+        return [FlowItem(Label(label.asset_id, label.name, label.url, label.size), ())
+                for label in sorted(labels, key=label_order)]
+
+    def walk(group, chain):
+        items = [FlowItem(group.tag, chain, group.key)] + [FlowItem(label, chain) for label in group.labels]
+        for child in group.children:
+            items += walk(child, chain + (child.key,))
+        return items
+
+    root = group_tree(labels, tag_width)
+    sequence = [FlowItem(label, ()) for label in root.labels]
+    for child in root.children:
+        sequence += walk(child, (child.key,))
+    return sequence
+
+
+def continuation_maker(sequence, tag_width):
+    """Name tags for a group that goes on in a new area: the whole path, so one tag says which outline is which."""
+    names = {item.opens: item.entry.name for item in sequence if item.opens}
+
+    def continuation(chain, max_width):
+        return NameTag(" > ".join(names[key] for key in chain) + CONTINUED, (), min(tag_width, max_width))
+
+    return continuation
 
 
 def cd_areas():
@@ -305,11 +345,12 @@ def sheet_box():
     return SHEET_MARGIN_MM, SHEET_MARGIN_MM, PAGE_SIZE_MM[0] - SHEET_MARGIN_MM, PAGE_SIZE_MM[1] - SHEET_MARGIN_MM
 
 
-def sheets_pdf(labels, outline, sheet="cd", grouped=False):
-    """The whole print job as PDF bytes, and a summary line. `grouped` packs every location and machine
-    into its own outlined block that opens with its name tag."""
-    roots = group_tree(labels, grouped)
-    pages = lay_out(roots, cd_areas if sheet == "cd" else lambda: [FlatArea(*sheet_box())])
+def sheets_pdf(labels, outline, sheet="full", grouped=False):
+    """The whole print job as PDF bytes, and a summary line. `grouped` outlines every location and machine,
+    opened by its name tag."""
+    sequence = flow_sequence(labels, grouped, TAG_MAX_WIDTH_MM[sheet])
+    pages = lay_out(sequence, cd_areas if sheet == "cd" else lambda: [FlatArea(*sheet_box())],
+                    continuation_maker(sequence, TAG_MAX_WIDTH_MM[sheet]))
     contents = [sheet_content([(slot, entry_drawing(entry)) for slot, entry in placed], outline and sheet == "cd", outlines)
                 for placed, outlines in pages]
     tags = sum(isinstance(entry, NameTag) for placed, _ in pages for _, entry in placed)

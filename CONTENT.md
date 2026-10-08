@@ -1,6 +1,6 @@
 [InvenTree](https://github.com/inventree/InvenTree) in Docker, served over
 [Tailscale](https://tailscale.com/) with real HTTPS to every device on your tailnet, plus a catalog
-tool that keeps the inventory declared in TOML files and prints QR labels for CD label sheets.
+tool that keeps the inventory declared in TOML files and prints QR labels on A4 sticker sheets.
 
 ## Stack
 
@@ -66,11 +66,12 @@ activates it; add the widgets from the dashboard menu.
 
 ## Printing labels from InvenTree
 
-`plugins/cd_label_sheet` is a label printer plugin, the only way labels are printed: select stock
-items in InvenTree (by category, location, search or one by one), choose Print labels, the `CD
-label sheet` template and the `Label sheets` printer, pick the sticker paper (A4 CD label sheets,
-labels around the rings, in the centre discs and around them; or full A4 sticker sheets, on a
-grid), and the PDF downloads. `catalog
+`plugins/asset_labels` is a label printer plugin, the only way labels are printed: select stock
+items in InvenTree (by category, location, search or one by one), choose Print labels, the `Asset
+labels` template and the `Asset labels` printer, pick the sticker paper (full A4 sticker sheets by
+default, or A4 CD label sheets with labels around the rings, in the centre discs and around them),
+and the PDF downloads. With "Outline groups" every location and machine gets a name tag and a
+nested outline, continued across pages. `catalog
 sync` activates both plugins and creates the template.
 
 ## Data and backups
