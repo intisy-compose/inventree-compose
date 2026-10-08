@@ -37,14 +37,16 @@ class Client:
     def delete(self, path):
         return self._request("DELETE", path)
 
-    def upload(self, path, field, file_name, data):
-        """PATCHes one file as multipart/form-data, the only way the API takes an image."""
+    def upload(self, path, field, file_name, data, method="PATCH", fields=None):
+        """Sends one file as multipart/form-data, the only way the API takes images and templates."""
         boundary = secrets.token_hex(16)
         content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
-        body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{os.path.basename(file_name)}\"\r\n"
-                f"Content-Type: {content_type}\r\n\r\n").encode() + data + f"\r\n--{boundary}--\r\n".encode()
-        request = self._prepare("PATCH", path, body, f"multipart/form-data; boundary={boundary}")
-        return self._send(request)
+        parts = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode()
+                 for name, value in (fields or {}).items()]
+        parts.append((f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{os.path.basename(file_name)}\"\r\n"
+                      f"Content-Type: {content_type}\r\n\r\n").encode() + data + b"\r\n")
+        body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+        return self._send(self._prepare(method, path, body, f"multipart/form-data; boundary={boundary}"))
 
     def _request(self, method, path, body=None):
         data = json.dumps(body).encode() if body is not None else None
