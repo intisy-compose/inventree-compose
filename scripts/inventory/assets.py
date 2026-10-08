@@ -148,6 +148,9 @@ def validate_serialization(entry, taxonomy):
 def update_assets(batch, taxonomy, client):
     items = remote_items(client)
     for entry in batch:
+        if is_stock(entry):
+            validate_stock_move(entry, taxonomy, items)
+            continue
         if "id" not in entry or entry["id"] not in items:
             raise CatalogError(f"update needs the id of an existing asset: {entry.get('id')}")
         validate_entry(entry, taxonomy, set(items), adding=False)
@@ -157,6 +160,9 @@ def update_assets(batch, taxonomy, client):
     locations = by_name(client.get("/api/stock/location/"))
     lines = []
     for entry in batch:
+        if is_stock(entry):
+            lines.append(install_stock(client, entry, parts, items))
+            continue
         item = items[entry["id"]]
         body = item_body(entry, parts, locations, items)
         move_item(client, item, entry, body, items)
@@ -172,9 +178,45 @@ def move_item(client, item, entry, body, items):
     if "installed_in" in entry:
         body.pop("belongs_to")
         body.pop("location")
+        if item.get("belongs_to"):
+            client.post(f"/api/stock/{item['pk']}/uninstall/", {"location": root_location(item, items), "note": "catalog update"})
         client.post(f"/api/stock/{items[entry['installed_in']]['pk']}/install/", {"stock_item": item["pk"], "quantity": 1, "note": "catalog update"})
     elif "location" in entry and item.get("belongs_to"):
         client.post(f"/api/stock/{item['pk']}/uninstall/", {"location": body.pop("location"), "note": "catalog update"})
+
+
+def root_location(item, items):
+    """Where an installed item physically is: the location of the outermost item it sits in."""
+    by_pk = {other["pk"]: other for other in items.values()}
+    while item.get("belongs_to") in by_pk:
+        item = by_pk[item["belongs_to"]]
+    return item.get("location")
+
+
+def validate_stock_move(entry, taxonomy, items):
+    """Stock has no id, so a move names its model, the quantity and the asset it goes into."""
+    require(taxonomy, "models", entry.get("model"), f"stock {entry.get('model')}")
+    if set(entry) != {"model", "quantity", "installed_in"}:
+        raise CatalogError(f"stock {entry['model']}: an update moves stock with exactly model, quantity and installed_in")
+    if entry["installed_in"] not in items:
+        raise CatalogError(f"stock {entry['model']}: installed_in '{entry['installed_in']}' is not an asset")
+
+
+def install_stock(client, entry, parts, items):
+    part = parts[entry["model"].lower()]["pk"]
+    loose = [row for row in client.get("/api/stock/", part=part) if not row.get("serial") and not row.get("belongs_to")]
+    available = sum(float(row["quantity"]) for row in loose)
+    if available < entry["quantity"]:
+        raise CatalogError(f"stock {entry['model']}: {available:g} loose, {entry['quantity']} to install")
+    host = items[entry["installed_in"]]["pk"]
+    remaining = entry["quantity"]
+    for row in loose:
+        if remaining <= 0:
+            break
+        taken = min(remaining, float(row["quantity"]))
+        client.post(f"/api/stock/{host}/install/", {"stock_item": row["pk"], "quantity": taken, "note": "catalog update"})
+        remaining -= taken
+    return f"~ {entry['quantity']} x {entry['model']}: installed_in {entry['installed_in']}"
 
 
 def plan_label_tags(taxonomy, client):
