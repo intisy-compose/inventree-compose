@@ -25,8 +25,11 @@ x-inventree: &inventree
     INVENTREE_CACHE_ENABLED: "False"
     INVENTREE_LOG_LEVEL: WARNING
     INVENTREE_TIMEZONE: ${TIMEZONE:-Europe/Berlin}
+    INVENTREE_PLUGINS_ENABLED: "True"
+    INVENTREE_PLUGIN_DIR: /home/inventree/plugins
   volumes:
     - inventree-files:/home/inventree/data
+    - ./plugins:/home/inventree/plugins:ro
 
 services:
   # Owns the network namespace the gateway shares, and forwards tailnet :443 to Caddy. The node key

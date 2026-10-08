@@ -1,16 +1,21 @@
-"""Prints asset labels onto A4 CD label sheets: labels placed radially around each ring, cut apart
-after printing. Every size gets its own sheets; `none` items are only listed."""
+"""Prints asset labels onto A4 CD label sheets and cuts nothing to waste: labels sit radially around
+each ring, upright inside each centre disc and upright on the sheet around the rings, to be cut
+apart after printing. Every size gets its own sheets; `none` items are only listed."""
 
 import math
 import os
 from dataclasses import dataclass
 
 PAGE_SIZE_MM = (210, 297)
-# Measured on a test print against a real sheet: the rings sit 5 mm left of the page centre.
-RING_CENTRES_MM = ((100, 72), (100, 225))
-RING_OUTER_RADIUS_MM = 58.5
-RING_HOLE_RADIUS_MM = 20.5
+# The printer fits the A4 page into its printable area, shrinking everything to about 97.5%, so the
+# rings are drawn larger and offset to land on the stickers. Measured from a test print scanned with
+# the real sheet (2026-10-08): 117 mm rings printed 114 mm wide and 149.2 mm apart instead of 153.
+PRINT_SCALE = 0.975
+RING_CENTRES_MM = ((94.0, 72.9), (94.0, 225.1))
+RING_OUTER_RADIUS_MM = 58.5 / PRINT_SCALE
+RING_HOLE_RADIUS_MM = 20.5 / PRINT_SCALE
 RING_SAFETY_MM = 2.5
+SHEET_MARGIN_MM = 8.0
 LABEL_GAP_MM = 1.0
 PADDING_MM = 0.6
 QR_QUIET_MODULES = 2
@@ -54,20 +59,79 @@ def text_width(text, size_mm, widths):
     return sum(widths.get(char, 556) for char in text) / 1000 * size_mm
 
 
-def ring_slots(size):
-    """(inner radius, angle) per label, in as many circles as fit between the hole and the edge.
+@dataclass
+class Slot:
+    """Where a label goes: the middle of its bottom edge (y from the top of the page), and the
+    direction its top points in, in degrees (90 = up the page)."""
+    x: float
+    y: float
+    angle: float
 
-    Radially placed labels only spread apart outwards, so neighbours are spaced by their inner corners
-    and the next circle starts beyond the outer corners."""
+
+def ring_slots(size, centre):
+    """Radially placed labels in as many circles as fit between the hole and the edge. They only spread
+    apart outwards, so neighbours are spaced by their inner corners and the next circle starts
+    beyond the outer corners."""
     radius = RING_HOLE_RADIUS_MM + RING_SAFETY_MM
     limit = RING_OUTER_RADIUS_MM - RING_SAFETY_MM
     slots = []
     while math.hypot(radius + size.height, size.width / 2) <= limit:
         pitch = 2 * math.degrees(math.atan((size.width + LABEL_GAP_MM) / 2 / radius))
         count = int(360 // pitch)
-        slots += [(radius, 90 - index * 360 / count) for index in range(count)]
+        for index in range(count):
+            angle = 90 - index * 360 / count
+            slots.append(Slot(centre[0] + math.cos(math.radians(angle)) * radius,
+                              centre[1] - math.sin(math.radians(angle)) * radius, angle))
         radius = math.hypot(radius + size.height, size.width / 2) + LABEL_GAP_MM
     return slots
+
+
+def grid(size, left, top, right, bottom):
+    """Upright label rectangles (left, top, right, bottom) on a regular grid inside a box, centred."""
+    step_x, step_y = size.width + LABEL_GAP_MM, size.height + LABEL_GAP_MM
+    columns = int((right - left + LABEL_GAP_MM) // step_x)
+    rows = int((bottom - top + LABEL_GAP_MM) // step_y)
+    start_x = left + (right - left - (columns * step_x - LABEL_GAP_MM)) / 2
+    start_y = top + (bottom - top - (rows * step_y - LABEL_GAP_MM)) / 2
+    return [(start_x + column * step_x, start_y + row * step_y, start_x + column * step_x + size.width,
+             start_y + row * step_y + size.height) for row in range(rows) for column in range(columns)]
+
+
+def distance_to_rectangle(point, rectangle):
+    left, top, right, bottom = rectangle
+    dx = max(left - point[0], 0, point[0] - right)
+    dy = max(top - point[1], 0, point[1] - bottom)
+    return math.hypot(dx, dy)
+
+
+def farthest_corner(point, rectangle):
+    left, top, right, bottom = rectangle
+    return max(math.hypot(x - point[0], y - point[1]) for x in (left, right) for y in (top, bottom))
+
+
+def upright(rectangle):
+    left, _, right, bottom = rectangle
+    return Slot((left + right) / 2, bottom, 90)
+
+
+def disc_slots(size, centre):
+    limit = RING_HOLE_RADIUS_MM - RING_SAFETY_MM
+    box = (centre[0] - limit, centre[1] - limit, centre[0] + limit, centre[1] + limit)
+    return [upright(rectangle) for rectangle in grid(size, *box) if farthest_corner(centre, rectangle) <= limit]
+
+
+def outside_slots(size):
+    box = (SHEET_MARGIN_MM, SHEET_MARGIN_MM, PAGE_SIZE_MM[0] - SHEET_MARGIN_MM, PAGE_SIZE_MM[1] - SHEET_MARGIN_MM)
+    clearance = RING_OUTER_RADIUS_MM + RING_SAFETY_MM
+    return [upright(rectangle) for rectangle in grid(size, *box)
+            if all(distance_to_rectangle(centre, rectangle) >= clearance for centre in RING_CENTRES_MM)]
+
+
+def page_slots(size):
+    slots = []
+    for centre in RING_CENTRES_MM:
+        slots += ring_slots(size, centre) + disc_slots(size, centre)
+    return slots + outside_slots(size)
 
 
 def qr_modules(url):
@@ -153,7 +217,7 @@ def circle_path(x, y, radius):
 
 
 def sheet_content(placed, outline):
-    """One page: every (ring centre, slot, drawing), with y flipped so centres read from the top-left."""
+    """One page: every (slot, drawing), with y flipped so slots read from the top-left."""
     points_per_mm = 72 / 25.4
     operators = [f"{points_per_mm:.6f} 0 0 {points_per_mm:.6f} 0 0 cm"]
     if outline:
@@ -162,11 +226,9 @@ def sheet_content(placed, outline):
             for radius in (RING_OUTER_RADIUS_MM, RING_HOLE_RADIUS_MM):
                 operators.append(circle_path(centre_x, PAGE_SIZE_MM[1] - centre_y, radius))
         operators.append("[] 0 d")
-    for (centre_x, centre_y), (radius, angle), drawing in placed:
-        cos, sin = math.cos(math.radians(angle)), math.sin(math.radians(angle))
-        origin_x = centre_x + cos * radius
-        origin_y = PAGE_SIZE_MM[1] - centre_y + sin * radius
-        operators.append(f"q {sin:.6f} {-cos:.6f} {cos:.6f} {sin:.6f} {origin_x:.3f} {origin_y:.3f} cm\n{drawing}\nQ")
+    for slot, drawing in placed:
+        cos, sin = math.cos(math.radians(slot.angle)), math.sin(math.radians(slot.angle))
+        operators.append(f"q {sin:.6f} {-cos:.6f} {cos:.6f} {sin:.6f} {slot.x:.3f} {PAGE_SIZE_MM[1] - slot.y:.3f} cm\n{drawing}\nQ")
     return "\n".join(operators)
 
 
@@ -197,12 +259,11 @@ def pdf_document(pages):
 
 
 def size_pages(labels, size, outline):
-    slots = [(centre, slot) for centre in RING_CENTRES_MM for slot in ring_slots(SIZES[size])]
+    slots = page_slots(SIZES[size])
     pages = []
     for first in range(0, len(labels), len(slots)):
         batch = labels[first:first + len(slots)]
-        placed = [(centre, slot, label_drawing(label)) for (centre, slot), label in zip(slots, batch)]
-        pages.append(sheet_content(placed, outline))
+        pages.append(sheet_content([(slot, label_drawing(label)) for slot, label in zip(slots, batch)], outline))
     return pages, len(slots)
 
 
