@@ -4,7 +4,10 @@ upright on the sheet around the rings. On a full sticker sheet they sit on a gri
 its own sheets."""
 
 import math
-from dataclasses import dataclass
+import zlib
+from dataclasses import dataclass, field
+
+from .outlines import Placed, group_levels, label_corners, outline_mask
 
 PAGE_SIZE_MM = (210, 297)
 # Calibrated for the human partner's printer, paper pushed against the tray guide: see RULES.md in compose/docs.
@@ -49,10 +52,13 @@ SIZES = {
 
 @dataclass
 class Label:
+    """`groups` is where the item is, outermost first: (key, name) pairs of its locations and of the items
+    it is installed in. A label without an asset ID is a group's name tag in a spare slot."""
     asset_id: str
     name: str
     url: str
     size: str
+    groups: tuple = field(default_factory=tuple)
 
 
 def text_width(text, size_mm, widths):
@@ -192,6 +198,8 @@ def text_operator(font, size_mm, x, y, text):
 
 def label_drawing(label):
     """PDF operators for one label in its own frame: x across, y outwards from the ring centre, in mm."""
+    if not label.asset_id:
+        return name_tag_drawing(label)
     size = SIZES[label.size]
     operators = [f"0.1 w 0.6 G {-size.width / 2:.3f} 0 {size.width:.3f} {size.height:.3f} re S", "0 g"]
     baseline = PADDING_MM + 0.2
@@ -204,6 +212,24 @@ def label_drawing(label):
     operators.append(text_operator("F1", size.id_text, -id_width / 2, baseline, label.asset_id))
     if size.with_qr:
         operators += qr_operators(label.url, size, baseline + 0.75 * size.id_text + 0.4)
+    return "\n".join(operators)
+
+
+def name_tag_drawing(label):
+    """A group's name in a spare slot, as large as fits on up to three lines."""
+    size = SIZES[label.size]
+    available = size.width - 2 * PADDING_MM
+    for text_size in (2.4, 2.0, 1.7, 1.4):
+        max_lines = max(1, int((size.height - 2 * PADDING_MM) // (text_size * 1.15)))
+        lines = wrap(label.name, text_size, available, min(max_lines, 3))
+        if not lines[-1].endswith("..."):
+            break
+    block = len(lines) * text_size * 1.15
+    baseline = (size.height + block) / 2 - text_size
+    operators = []
+    for line in lines:
+        operators.append(text_operator("F2", text_size, -text_width(line, text_size, HELVETICA) / 2, baseline, line))
+        baseline -= text_size * 1.15
     return "\n".join(operators)
 
 
@@ -229,11 +255,13 @@ def circle_path(x, y, radius):
             f"{x + k:.3f} {y - radius:.3f} {x + radius:.3f} {y - k:.3f} {x + radius:.3f} {y:.3f} c S")
 
 
-def sheet_content(placed, outline):
+def sheet_content(placed, outline, with_mask=False):
     """One page: every (slot, drawing), with y flipped so slots read from the top-left. The outline
-    draws the CD rings, for a test print against a sheet."""
+    draws the CD rings, for a test print against a sheet; the mask is the group outlines' image."""
     points_per_mm = 72 / 25.4
     operators = [f"{points_per_mm:.6f} 0 0 {points_per_mm:.6f} 0 0 cm"]
+    if with_mask:
+        operators.append(f"q 0 g {PAGE_SIZE_MM[0]} 0 0 {PAGE_SIZE_MM[1]} 0 0 cm /Outlines Do Q")
     if outline:
         operators.append("0.2 w 0 G [1 1] 0 d")
         for centre_x, centre_y in RING_CENTRES_MM:
@@ -247,24 +275,31 @@ def sheet_content(placed, outline):
 
 
 def pdf_document(pages):
-    """A minimal PDF: Helvetica and Helvetica-Bold, one uncompressed content stream per page."""
+    """A minimal PDF: Helvetica and Helvetica-Bold, one uncompressed content stream per page, and per page
+    an optional 1-bit image mask (the group outlines). `pages` holds (content, mask or None)."""
     width, height = (size * 72 / 25.4 for size in PAGE_SIZE_MM)
-    page_ids = [5 + 2 * index for index in range(len(pages))]
+    page_ids = [5 + 3 * index for index in range(len(pages))]
     objects = {
         1: "<< /Type /Catalog /Pages 2 0 R >>",
         2: f"<< /Type /Pages /Kids [{' '.join(f'{page_id} 0 R' for page_id in page_ids)}] /Count {len(pages)} >>",
         3: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
         4: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
     }
-    for page_id, content in zip(page_ids, pages):
+    for page_id, (content, mask) in zip(page_ids, pages):
+        images = f"/XObject << /Outlines {page_id + 2} 0 R >> " if mask is not None else ""
         objects[page_id] = (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width:.2f} {height:.2f}] "
-                            f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {page_id + 1} 0 R >>")
-        objects[page_id + 1] = f"<< /Length {len(content.encode('latin-1'))} >>\nstream\n{content}\nendstream"
+                            f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> {images}>> /Contents {page_id + 1} 0 R >>")
+        objects[page_id + 1] = stream("", content.encode("latin-1"))
+        if mask is not None:
+            objects[page_id + 2] = stream(f"/Type /XObject /Subtype /Image /Width {mask.width} /Height {mask.height} "
+                                          "/ImageMask true /BitsPerComponent 1 /Decode [1 0] /Filter /FlateDecode ",
+                                          zlib.compress(mask.tobytes(), 9))
     output = b"%PDF-1.4\n"
     offsets = {}
     for object_id in sorted(objects):
         offsets[object_id] = len(output)
-        output += f"{object_id} 0 obj\n{objects[object_id]}\nendobj\n".encode("latin-1")
+        body = objects[object_id]
+        output += f"{object_id} 0 obj\n".encode("latin-1") + (body if isinstance(body, bytes) else body.encode("latin-1")) + b"\nendobj\n"
     xref = len(output)
     output += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode("latin-1")
     output += "".join(f"{offsets[object_id]:010d} 00000 n \n" for object_id in sorted(objects)).encode("latin-1")
@@ -272,23 +307,86 @@ def pdf_document(pages):
     return output
 
 
-def size_pages(labels, size, outline, sheet):
-    slots = page_slots(SIZES[size], sheet)
+def stream(dictionary, data):
+    return f"<< {dictionary}/Length {len(data)} >>\nstream\n".encode("latin-1") + data + b"\nendstream"
+
+
+def by_group(labels):
+    return sorted(labels, key=lambda label: ([name for _, name in label.groups], label.asset_id))
+
+
+def with_name_tags(batch, spare):
+    """Spends a page's spare slots on group names, each at the start of its group, innermost groups first."""
+    placed = [Placed([], label.groups) for label in batch]
+    levels, members = group_levels(placed)
+    chosen = sorted(levels, key=lambda group: (levels[group], min(members[group])))[:spare]
+    first_of = {}
+    for group in chosen:
+        first_of.setdefault(min(members[group]), []).append(group)
+    result = []
+    for index, label in enumerate(batch):
+        for group in sorted(first_of.get(index, []), key=lambda group: -levels[group]):
+            chain = label.groups[:label.groups.index(group) + 1]
+            result.append(Label("", group[1], "", label.size, chain))
+        result.append(label)
+    return result
+
+
+def page_batches(labels, capacity, grouped):
+    """Full pages first; only the last page has spare slots, and with groups on they carry the names."""
+    batches = [labels[first:first + capacity] for first in range(0, len(labels), capacity)]
+    if grouped and batches and len(batches[-1]) < capacity:
+        batches[-1] = with_name_tags(batches[-1], capacity - len(batches[-1]))
+    return batches
+
+
+def walking_order(slots, size):
+    """The slots as a walk from the top-left, always on to the nearest free one, so labels that follow each
+    other sit next to each other and a group's labels stay together."""
+    centres = [centre_of(slot, size) for slot in slots]
+    remaining = set(range(len(slots)))
+    current = min(remaining, key=lambda index: centres[index][0] + centres[index][1])
+    order = []
+    while remaining:
+        remaining.discard(current)
+        order.append(slots[current])
+        if remaining:
+            here = centres[current]
+            current = min(remaining, key=lambda index: math.hypot(centres[index][0] - here[0], centres[index][1] - here[1]))
+    return order
+
+
+def centre_of(slot, size):
+    angle = math.radians(slot.angle)
+    return slot.x + math.cos(angle) * size.height / 2, slot.y - math.sin(angle) * size.height / 2
+
+
+def size_pages(labels, size, outline, sheet, grouped=False):
+    label_size = SIZES[size]
+    slots = page_slots(label_size, sheet)
+    if grouped:
+        slots = walking_order(slots, label_size)
     pages = []
-    for first in range(0, len(labels), len(slots)):
-        batch = labels[first:first + len(slots)]
-        pages.append(sheet_content([(slot, label_drawing(label)) for slot, label in zip(slots, batch)], outline))
+    for batch in page_batches(by_group(labels) if grouped else labels, len(slots), grouped):
+        mask = None
+        if grouped:
+            placed = [Placed(label_corners(slot, label_size.width, label_size.height), label.groups)
+                      for slot, label in zip(slots, batch)]
+            mask = outline_mask(placed, PAGE_SIZE_MM)
+        drawings = [(slot, label_drawing(label)) for slot, label in zip(slots, batch)]
+        pages.append((sheet_content(drawings, outline, mask is not None), mask))
     return pages, len(slots)
 
 
-def sheets_pdf(labels, outline, sheet="cd"):
-    """The whole print job as PDF bytes, and one summary line per size."""
+def sheets_pdf(labels, outline, sheet="cd", grouped=False):
+    """The whole print job as PDF bytes, and one summary line per size. `grouped` orders the labels by
+    where they are and outlines each group."""
     pages, lines = [], []
     for size in PRINT_ORDER:
         sized = [label for label in labels if label.size == size]
         if not sized:
             continue
-        size_pages_list, per_sheet = size_pages(sized, size, outline and sheet == "cd", sheet)
+        size_pages_list, per_sheet = size_pages(sized, size, outline and sheet == "cd", sheet, grouped)
         pages += size_pages_list
         lines.append(f"  {size}: {len(sized)} labels on {len(size_pages_list)} sheet(s), {per_sheet} per sheet")
     return (pdf_document(pages) if pages else None), lines
