@@ -4,12 +4,17 @@
 from dataclasses import dataclass
 from typing import Callable
 
+from .taxonomy import CatalogError
+
 
 UNTESTED_STATE = {"key": 11, "name": "UNTESTED", "label": "Untested", "color": "secondary", "logical_key": 10,
                   "reference_status": "StockStatus"}
 # A computer's parts are installed in it without the computer being an assembly with a bill of materials.
 GLOBAL_SETTINGS = {"SERIAL_NUMBER_GLOBALLY_UNIQUE": True, "INVENTREE_DEFAULT_CURRENCY": "EUR",
-                   "STOCK_ENFORCE_BOM_INSTALLATION": False}
+                   "STOCK_ENFORCE_BOM_INSTALLATION": False, "ENABLE_PLUGINS_INTERFACE": True}
+PLUGINS = ("inventory-dashboard", "cd-label-sheet")
+LABEL_TEMPLATE = {"name": "CD label sheet", "model_type": "stockitem", "width": 210, "height": 297,
+                  "description": "Choose it with the CD label sheet printer; that plugin lays out the page itself"}
 
 
 @dataclass
@@ -37,6 +42,8 @@ def stages(taxonomy, client):
     return [
         lambda: plan_settings(client),
         lambda: plan_untested_state(client),
+        lambda: plan_plugins(client),
+        lambda: plan_label_template(client),
         lambda: plan_categories(taxonomy, client),
         lambda: plan_templates(taxonomy, client),
         lambda: plan_category_links(taxonomy, client),
@@ -76,6 +83,27 @@ def plan_untested_state(client):
         return []
     model = client.get("/api/contenttype/model/stockitem/")["pk"]
     return [Change("+ stock status Untested", lambda: client.post("/api/generic/status/custom/", {**UNTESTED_STATE, "model": model}))]
+
+
+def plan_plugins(client):
+    """The plugins live in plugins/, mounted into the server; an unknown one means the mount is missing."""
+    installed = {plugin["key"]: plugin for plugin in client.get("/api/plugins/")}
+    changes = []
+    for key in PLUGINS:
+        if key not in installed:
+            raise CatalogError(f"plugin {key} is not installed; is plugins/ mounted into the server?")
+        if not installed[key]["active"]:
+            changes.append(Change(f"+ plugin {key} active", lambda key=key: client.patch(f"/api/plugins/{key}/activate/", {"active": True})))
+    return changes
+
+
+def plan_label_template(client):
+    existing = client.get("/api/label/template/", model_type=LABEL_TEMPLATE["model_type"])
+    if any(template["name"] == LABEL_TEMPLATE["name"] for template in existing):
+        return []
+    body = b"<div>{{ item.serial }}</div>\n"
+    return [Change(f"+ label template {LABEL_TEMPLATE['name']}", lambda: client.upload(
+        "/api/label/template/", "template", "cd-label-sheet.html", body, method="POST", fields=LABEL_TEMPLATE))]
 
 
 def plan_categories(taxonomy, client):
@@ -136,7 +164,7 @@ def parents_first(locations):
     while pending:
         ready = [entry for entry in pending if not entry.get("parent") or entry["parent"].lower() in placed]
         if not ready:
-            raise ValueError("location parents form a cycle")
+            raise CatalogError("location parents form a cycle")
         for entry in ready:
             ordered.append(entry)
             placed.add(entry["name"].lower())
