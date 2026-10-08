@@ -7,11 +7,9 @@ import os
 from dataclasses import dataclass
 
 PAGE_SIZE_MM = (210, 297)
-# The printer fits the A4 page into its printable area, shrinking everything to about 97.5%, so the
-# rings are drawn larger and offset to land on the stickers. Measured from a test print scanned with
-# the real sheet (2026-10-08): 117 mm rings printed 114 mm wide and 149.2 mm apart instead of 153.
+# Calibrated for the human partner's printer, fed so labels print upright: see RULES.md in compose/docs.
 PRINT_SCALE = 0.975
-RING_CENTRES_MM = ((94.0, 72.9), (94.0, 225.1))
+RING_CENTRES_MM = ((104.3, 72.1), (104.3, 224.3))
 RING_OUTER_RADIUS_MM = 58.5 / PRINT_SCALE
 RING_HOLE_RADIUS_MM = 20.5 / PRINT_SCALE
 RING_SAFETY_MM = 2.5
