@@ -108,6 +108,8 @@ function scoresOf(row) {
     return Object.fromEntries((row.resources ?? []).map((resource) => [resource.resource, resource.score]));
 }
 
+const SCORE_LABELS = { cpu: "score", ram_size: "size", ram_speed: "speed", storage_tb: "capacity", storage_speed: "speed", gpu: "speed", vram: "VRAM" };
+
 function groupCell(row, keys) {
     const figures = row.figures ?? {};
     const scores = scoresOf(row);
@@ -116,8 +118,18 @@ function groupCell(row, keys) {
         return cell("-", -1);
     }
     const scored = present.filter((key) => scores[key] !== undefined && scores[key] !== null);
-    const scoreLine = scored.length ? `<div style="opacity: 0.6; font-size: 0.85em">${scored.map((key) => points(scores[key])).join(" &middot; ")}</div>` : "";
+    const scoreLine = scored.length ? `<div style="opacity: 0.6; font-size: 0.85em">${scored.map((key) =>
+        `${SCORE_LABELS[key]} ${points(scores[key])}`).join(" &middot; ")}</div>` : "";
     return cell(`<div>${escape(present.map((key) => figureText(key, figures[key])).join(" · "))}</div>${scoreLine}`, figures[present[0]]);
+}
+
+function overheadCell(row) {
+    const overhead = (row.resources ?? []).find((resource) => resource.resource === "overhead");
+    if (!overhead || overhead.score === null || overhead.score === undefined) {
+        return cell("-", -1);
+    }
+    return cell(`<div>${watts(overhead.overhead_w)}</div><div style="opacity: 0.6; font-size: 0.85em">${points(overhead.score)}% to working parts</div>`,
+        overhead.score);
 }
 
 function work(row) {
@@ -132,18 +144,18 @@ function measured(row) {
 }
 
 function powerRow(row, first) {
-    return [first, cell(watts(row.average_w), row.average_w), ...GROUPS.map(([, keys]) => groupCell(row, keys)),
+    return [first, cell(watts(row.average_w), row.average_w), ...GROUPS.map(([, keys]) => groupCell(row, keys)), overheadCell(row),
         cell(score(row.score), row.score ?? -1)];
 }
 
-const POWER_HEADERS = ["Average", ...GROUPS.map(([name]) => name), "Score"];
+const POWER_HEADERS = ["Average", ...GROUPS.map(([name]) => name), "Overhead", "Score"];
 
 export function renderPower(target, data) {
     const context = data?.context ?? {};
     const machines = sortableTable(["Machine", ...POWER_HEADERS], (context.machines ?? []).map((row) =>
-        powerRow(row, cell(escape(row.name), row.name))), [1, 6]);
+        powerRow(row, cell(escape(row.name), row.name))), [1, 7]);
     const locations = sortableTable(["Location", ...POWER_HEADERS], (context.locations ?? []).map((row) =>
-        powerRow(row, cell(escape(row.name), row.name))), [1, 6]);
+        powerRow(row, cell(escape(row.name), row.name))), [1, 7]);
     frame(target, `${machines}<br>${locations}<p style="opacity: 0.7; font-size: 0.8em">Figures, and under them each resource's ` +
         `score in percent of the best part of its kind. The Efficiency menu shows how.</p>`);
     enableSorting(target);
@@ -163,10 +175,14 @@ function partLink(part) {
 }
 
 function resourceSummary(resource) {
+    if (resource.resource === "overhead") {
+        return `<b>Overhead</b>: ${watts(resource.overhead_w)} besides the working parts, ${points(resource.score)}% of the watts do ` +
+            `work, score <b>${points(resource.score)}</b>, weight ${Math.round(resource.weight * 100)}%`;
+    }
     const capped = resource.uncapped_figure ? `, could do ${figureText(resource.resource, resource.uncapped_figure)}` : "";
     const uncapped = resource.uncapped_score ? ` (${points(resource.uncapped_score)} without the cap)` : "";
     const figure = resource.figure ? figureText(resource.resource, resource.figure) : "none";
-    return `<b>${escape(resourceName(resource.resource))}</b>: ${escape(figure + capped)}, score <b>${points(resource.score ?? 1)}</b>` +
+    return `<b>${escape(resourceName(resource.resource))}</b>: ${escape(figure + capped)}, score <b>${points(resource.score)}</b>` +
         `${uncapped}, weight ${Math.round(resource.weight * 100)}%`;
 }
 
@@ -191,19 +207,16 @@ function resourceParts(parts, resource) {
 
 function resourceDetails(row) {
     const parts = row.parts ?? [];
-    const scored = new Set((row.resources ?? []).map((resource) => resource.resource));
-    const blocks = Object.keys(RESOURCES).filter((resource) => scored.has(resource)).map((resource) => {
-        const entry = row.resources.find((candidate) => candidate.resource === resource);
-        return `<details style="margin: 2px 0 2px 8px"><summary>${resourceSummary(entry)}</summary>` +
-            `<div style="margin-left: 14px">${resourceParts(parts, resource)}</div></details>`;
-    });
     const others = parts.filter((part) => !Object.keys(part.figures ?? {}).length);
-    if (others.length) {
-        blocks.push(`<details style="margin: 2px 0 2px 8px"><summary>Other parts, watts only (${others.length})</summary>` +
-            `<div style="margin-left: 14px">${table(["Asset", "Part", "Average"], others.map((part) =>
-                [partLink(part), escape(part.part), watts(part.average_w)]), [2])}</div></details>`);
-    }
-    return blocks.join("");
+    const order = [...Object.keys(RESOURCES), "overhead"];
+    return order.map((key) => (row.resources ?? []).find((resource) => resource.resource === key)).filter(Boolean).map((resource) => {
+        const body = resource.resource === "overhead"
+            ? (others.length ? table(["Asset", "Part", "Average"], others.map((part) => [partLink(part), escape(part.part), watts(part.average_w)]), [2])
+                : "") + (row.loss_w ? `<p style="opacity: 0.7; font-size: 0.85em; margin: 2px 0">Power supply loss: ${watts(row.loss_w)}</p>` : "")
+            : resourceParts(parts, resource.resource);
+        return `<details style="margin: 2px 0 2px 8px"><summary>${resourceSummary(resource)}</summary>` +
+            `<div style="margin-left: 14px">${body}</div></details>`;
+    }).join("");
 }
 
 export function renderPowerPanel(target, data) {
@@ -300,14 +313,47 @@ function scoreNote(scale) {
     }
     const share = Math.round((scale.utilisation ?? 0) * 100);
     const references = Object.entries(scale.resources ?? {}).map(([resource, reference]) =>
-        `${resourceName(resource)}: ${reference.best_part} / ${reference.best_machine}`).join("; ");
-    return `<p style="opacity: 0.7; font-size: 0.8em; margin-top: 12px">Each resource scores 100 x its efficiency / the efficiency ` +
-        `of the best of its kind you owned on ${escape(scale.set ?? "")}: the best part for a part, the best machine for a machine. ` +
-        `100 is that one and there is no upper limit. Efficiency is the figure per average ` +
-        `watt (idle plus ${share}% of the way to load; speeds count at ${share}% use, capacities in full). A machine scores the ` +
-        `weighted geometric mean of its resources by profile (a resource it lacks is left out), a location the mean of its machines ` +
-        `by watts. A drive counts at most at the speed of its port; an OS drive holds the system and adds no storage. ` +
+        `${resourceName(resource)}: ${reference.best_part}`).join("; ");
+    return `<p style="opacity: 0.7; font-size: 0.8em; margin-top: 12px">Every part scores 100 x its efficiency / the efficiency of ` +
+        `the best part of its kind you owned on ${escape(scale.set ?? "")}, with no upper limit. Efficiency is the figure per average ` +
+        `watt (idle plus ${share}% of the way to load; speeds count at ${share}% use, capacities in full). A machine's resource is the ` +
+        `score of the parts that provide it, weighted by how much each brings; its overhead is the share of its watts that go to ` +
+        `working parts. A machine scores the weighted geometric mean of these by profile (a resource it lacks is left out), a location ` +
+        `the mean of its machines by watts. A drive counts at most at the speed of its port; an OS drive adds no storage. ` +
         `References: ${escape(references)}.</p>`;
+}
+
+const MACHINE_COLUMNS = "minmax(180px, 2.2fr) 0.8fr 0.8fr 1.2fr 1.4fr 1.4fr 1.4fr 1fr 0.6fr";
+
+function machineCells(row) {
+    const name = `<a href="${row.url}" style="color: inherit">${escape(row.name)}</a>`;
+    return [cell(name, row.name), cell(escape(row.profile ?? "-"), row.profile ?? ""), ...powerRow(row, cell("", "")).slice(1)];
+}
+
+function machineBlock(row, rows, depth) {
+    const cells = machineCells(row).map((value, index) =>
+        `<div style="padding: 2px 6px; ${index >= 2 ? "text-align: right" : ""}">${value.html}</div>`).join("");
+    const children = rows.filter((child) => child.parent === row.pk).map((child) => machineBlock(child, rows, depth + 1)).join("");
+    const detail = resourceDetails(row);
+    return `<details style="margin-left: ${depth * 16}px; border-top: 1px solid rgba(128, 128, 128, 0.25)">` +
+        `<summary style="display: grid; grid-template-columns: ${MACHINE_COLUMNS}; align-items: start; cursor: pointer; font-size: 0.85em">` +
+        `${cells}</summary><div style="margin: 4px 0 8px 12px">${detail}${children}</div></details>`;
+}
+
+function machineList(target, rows, sortIndex, ascending) {
+    const top = rows.filter((row) => !row.parent || !rows.some((other) => other.pk === row.parent));
+    if (sortIndex !== null) {
+        top.sort((first, second) => compare(machineCells(first)[sortIndex].sort, machineCells(second)[sortIndex].sort) * (ascending ? 1 : -1));
+    }
+    const headers = ["Machine", "Profile", ...POWER_HEADERS].map((header, index) =>
+        `<div data-column="${index}" title="Sort" style="padding: 2px 6px; font-weight: 600; cursor: pointer; ${index >= 2 ? "text-align: right" : ""}">` +
+        `${escape(header)}</div>`).join("");
+    target.innerHTML = `<div style="display: grid; grid-template-columns: ${MACHINE_COLUMNS}; font-size: 0.85em; padding-left: 14px">${headers}</div>` +
+        top.map((row) => machineBlock(row, rows, 0)).join("");
+    target.querySelectorAll("[data-column]").forEach((header) => header.addEventListener("click", () => {
+        const index = Number(header.dataset.column);
+        machineList(target, rows, index, sortIndex === index ? !ascending : true);
+    }));
 }
 
 export function renderEfficiencyMenu(target, data) {
@@ -316,18 +362,14 @@ export function renderEfficiencyMenu(target, data) {
         frame(target, `<p style="opacity: 0.7">No power settings yet: run the catalog tool's sync.</p>`);
         return;
     }
-    const machines = sortableTable(["Machine", "Profile", ...POWER_HEADERS], (context.machines ?? []).map((row) => {
-        const [first, ...rest] = powerRow(row, cell(`<a href="${row.url}" style="color: inherit">${escape(row.name)}</a>`, row.name));
-        return [first, cell(escape(row.profile ?? "-"), row.profile ?? ""), ...rest];
-    }), [2, 7]);
     const locations = sortableTable(["Location", ...POWER_HEADERS, "Cluster storage"], (context.locations ?? []).map((row) =>
         [...powerRow(row, cell(escape(row.name), row.name)), cell(row.cluster_tb ? `${amount(row.cluster_tb)} TB` : "-", row.cluster_tb ?? 0)]),
-        [1, 6, 7]);
-    const details = (context.machines ?? []).filter((row) => row.resources?.length).map((row) =>
-        `<details style="margin: 4px 0"><summary><b>${escape(row.name)}</b>, score ${points(row.score)}, ${watts(row.average_w)} average` +
-        `${row.capped ? ", storage capped by its ports" : ""}</summary>${resourceDetails(row)}</details>`).join("");
-    frame(target, heading("Machines") + machines + heading("Locations") + locations + heading("Each machine, resource by resource") +
-        details + scoreNote(context.scale));
+        [1, 7, 8]);
+    frame(target, heading("Machines") + `<div data-machines></div>` + heading("Locations") + locations + scoreNote(context.scale));
+    if (!target) {
+        return;
+    }
+    machineList(target.querySelector("[data-machines]"), context.machines ?? [], null, true);
     enableSorting(target);
 }
 
