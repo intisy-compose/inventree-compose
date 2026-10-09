@@ -26,7 +26,9 @@ SIZE_RANK = {size: rank for rank, size in enumerate(LABEL_SIZES_PRINTED)}
 TAG_NAME_TEXT_MM = 2.2
 TAG_CONTENT_TEXT_MM = 1.6
 TAG_MIN_WIDTH_MM = 12.0
-TAG_MAX_WIDTH_MM = {"full": 60.0, "cd": 33.0}
+TAG_MAX_WIDTH_MM = {"full": 60.0, "cd": 27.0}
+TAG_WIDTH_STEPS_MM = (33.0, 45.0)
+TAG_CONTENT_LINES = 4
 CONTINUED = " (continued)"
 BOLD_WIDENING = 1.07
 # Round dots (zero-length dashes with round caps), so a cut line never reads as a group outline.
@@ -268,6 +270,16 @@ def label_order(label):
     return SIZE_RANK[label.size], label.asset_id
 
 
+def fitted_tag(name, contents, max_width):
+    """The narrowest tag on which the name takes two lines and the parts list four at most, so a machine with
+    one or two parts does not get a wide tag over empty space."""
+    for width in [step for step in TAG_WIDTH_STEPS_MM if step < max_width]:
+        tag = NameTag(name, contents, width)
+        if len(tag.name_lines) <= 2 and len(tag.content_lines) <= TAG_CONTENT_LINES:
+            return tag
+    return NameTag(name, contents, max_width)
+
+
 def group_tree(labels, tag_width):
     """Every location and every item with parts in it is a group that opens with its name tag; labels sit in
     their innermost group, largest first."""
@@ -277,7 +289,7 @@ def group_tree(labels, tag_width):
         for depth, (key, name, contents) in enumerate(label.groups):
             child = next((group for group in node.children if group.key == key), None)
             if child is None:
-                child = Group(key, name, contents, NameTag(name, contents, tag_width))
+                child = Group(key, name, contents, fitted_tag(name, contents, tag_width))
                 node.children.append(child)
             node = child
         node.labels.append(label)
@@ -313,11 +325,12 @@ def flow_sequence(labels, grouped, tag_width):
 
 
 def continuation_maker(sequence, tag_width):
-    """Name tags for a group that goes on in a new area: the whole path, so one tag says which outline is which."""
+    """Name tags for a group that goes on in a new area: its own name only, since the outlines around it show
+    which groups it sits in, and a whole path took several lines on a narrow area."""
     names = {item.opens: item.entry.name for item in sequence if item.opens}
 
     def continuation(chain, max_width):
-        return NameTag(" > ".join(names[key] for key in chain) + CONTINUED, (), min(tag_width, max_width))
+        return NameTag(names[chain[-1]] + CONTINUED, (), min(tag_width, max_width))
 
     return continuation
 
