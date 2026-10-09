@@ -32,6 +32,11 @@ def where_of(item):
     return item.location.pathstring if item.location else ""
 
 
+def role_of(item):
+    roles = [tag.name[len(power.ROLE_TAG):] for tag in item.tags.all() if tag.name.startswith(power.ROLE_TAG)]
+    return roles[0] if len(roles) == 1 else None
+
+
 def link_of(item):
     return {"pk": item.pk, "id": item.serial, "name": item.part.name, "url": f"/web/stock/item/{item.pk}"}
 
@@ -124,7 +129,7 @@ def machines_menu(scope, config):
     def node(item):
         parts = scope.subtree(item)
         summary = summaries.get(item.pk, {})
-        return {**link_of(item), "price": price_of(item), "value": sum(price_of(part) or 0.0 for part in parts),
+        return {**link_of(item), "price": price_of(item), "value": sum(price_of(part) or 0.0 for part in parts), "role": role_of(item),
                 "average_w": summary.get("average_w"), "score": summary.get("score"),
                 "children": [node(child) for child in sorted(scope.installed(item), key=lambda child: child.serial)]}
 

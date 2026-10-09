@@ -35,6 +35,10 @@ MEMORY_CATEGORY = "Memory"
 COMPUTER_CATEGORY = "Computers"
 SPEED_RESOURCES = ("cpu", "ram_speed", "storage_speed", "gpu")
 RESOURCES = ("cpu", "ram_size", "ram_speed", "storage_tb", "storage_speed", "gpu", "vram")
+STORAGE_RESOURCES = ("storage_tb", "storage_speed")
+ROLE_TAG = "role-"
+OS_ROLE = "os"
+CLUSTER_ROLE = "cluster"
 HARD_DRIVE = ("Storage medium", "HDD")
 TERABYTES = "TB"
 
@@ -47,6 +51,7 @@ class Asset:
     category: str
     location: int | None
     belongs_to: int | None
+    role: str | None = None
 
 
 def part_figures(asset, parameters):
@@ -90,9 +95,14 @@ class Totals:
     parts: list = field(default_factory=list)
 
     def values(self, resource, uncapped=False):
+        """The parts' figures for a resource; an OS drive holds the system, so it adds no storage."""
         key = "uncapped" if uncapped else "figures"
         return [part[key].get(resource, part["figures"].get(resource)) for part in self.parts
-                if resource in part["figures"]]
+                if resource in part["figures"] and not (part["role"] == OS_ROLE and resource in STORAGE_RESOURCES)]
+
+    @property
+    def cluster_terabytes(self):
+        return sum(part["figures"].get("storage_tb", 0.0) for part in self.parts if part["role"] == CLUSTER_ROLE)
 
     def resource(self, name, uncapped=False):
         """A machine's figure per resource: sums for what adds up, the best part for speeds, the slowest
@@ -130,9 +140,6 @@ class Totals:
 
 def average_power(idle_w, load_w, utilisation):
     return idle_w + utilisation * (load_w - idle_w)
-
-
-MISSING_SCORE = 1.0
 
 
 PART_LEVEL = "part"
@@ -240,7 +247,8 @@ def totals(assets, parameters_of):
         result.idle_w += idle or 0.0
         result.load_w += (load if load is not None else idle) or 0.0
         result.parts.append({"serial": asset.serial, "pk": asset.pk, "part": asset.part, "category": asset.category,
-                             "idle_w": idle, "load_w": load, "figures": figures, "uncapped": uncapped, "cap": cap})
+                             "role": asset.role, "idle_w": idle, "load_w": load, "figures": figures, "uncapped": uncapped,
+                             "cap": cap})
     rated = sum(number(supply, WATTAGE) or 0.0 for supply in supplies)
     for supply in supplies:
         share = (number(supply, WATTAGE) or 0.0) / rated if rated else 1 / len(supplies)
@@ -303,12 +311,12 @@ def part_scores(parts, config, utilisation):
 
 def weighted_score(rows):
     """The weighted geometric mean, so one resource far ahead of the rest (an NVMe drive per watt against a hard
-    drive) cannot swamp them. A resource the machine lacks counts as 1: it cannot do that part of the job."""
-    total = sum(row["weight"] for row in rows)
+    drive) cannot swamp them. A resource the machine lacks is left out: it is judged on what it has."""
+    present = [row for row in rows if row["score"]]
+    total = sum(row["weight"] for row in present)
     if not total:
         return None
-    logs = sum(row["weight"] * math.log(max(row["score"] or MISSING_SCORE, MISSING_SCORE)) for row in rows)
-    return round(math.exp(logs / total), 1)
+    return round(math.exp(sum(row["weight"] * math.log(row["score"]) for row in present) / total), 1)
 
 
 def summary(name, found, config, utilisation, measured=None, on_share=1.0, profile=None):
@@ -323,7 +331,7 @@ def summary(name, found, config, utilisation, measured=None, on_share=1.0, profi
     score = weighted_score(resources)
     figures = {resource: round(found.resource(resource), 2) for resource in RESOURCES if found.resource(resource)}
     return {"name": name, "job": job, "profile": profile, "resources": resources, "figures": figures,
-            "capped": found.capped, "utilisation": utilisation, "idle_w": round(found.wall_idle_w, 1),
+            "cluster_tb": round(found.cluster_terabytes, 2), "capped": found.capped, "utilisation": utilisation, "idle_w": round(found.wall_idle_w, 1),
             "average_w": round(average * on_share, 1), "on_share": on_share, "load_w": round(found.wall_load_w, 1),
             "loss_w": round(found.loss_idle_w + utilisation * (found.loss_load_w - found.loss_idle_w), 1),
             "cpu_mark": round(found.cpu_mark), "terabytes": round(found.terabytes, 1), "score": score,

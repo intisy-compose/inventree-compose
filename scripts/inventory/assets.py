@@ -5,17 +5,21 @@ import re
 from .sync import UNTESTED_STATE, Change, by_name, tags_by_pk
 from .taxonomy import LABEL_SIZES, CatalogError, label_size, require
 
-ASSET_KEYS = {"id", "model", "location", "installed_in", "condition", "value", "description", "label", "quantity"}
+ASSET_KEYS = {"id", "model", "location", "installed_in", "condition", "value", "description", "label", "quantity", "role"}
 ASSET_ID = re.compile(r"^SAM-\d{4,}$")
 CONDITIONS = {"Tested working": 10, "Untested": UNTESTED_STATE["key"], "Needs repair": 50, "Broken": 55}
 LABEL_TAG = "label-"
 # Marks an asset whose label size was set on the asset itself, so sync leaves it alone. It must not start
 # with LABEL_TAG, which the label printer reads as a size.
 OWN_LABEL_TAG = "own-label"
+ROLE_TAG = "role-"
+ROLES = ("os", "cluster", "data", "array")
+NO_ROLE = "none"
 
 
 def remote_items(client):
-    label_tags = tags_by_pk(client, "/api/stock/", [LABEL_TAG + size for size in LABEL_SIZES] + [OWN_LABEL_TAG])
+    label_tags = tags_by_pk(client, "/api/stock/", [LABEL_TAG + size for size in LABEL_SIZES] + [OWN_LABEL_TAG] +
+                            [ROLE_TAG + role for role in ROLES])
     items = {}
     for item in client.get("/api/stock/", part_detail="true"):
         if item.get("serial"):
@@ -55,6 +59,8 @@ def validate_entry(entry, taxonomy, known_ids, adding):
         raise CatalogError(f"{context}: value must be a number of euros")
     if "label" in entry and entry["label"] not in LABEL_SIZES:
         raise CatalogError(f"{context}: label must be one of {', '.join(LABEL_SIZES)}")
+    if "role" in entry and entry["role"] not in ROLES + (NO_ROLE,):
+        raise CatalogError(f"{context}: role must be one of {', '.join(ROLES + (NO_ROLE,))}")
 
 
 def hosts_first(batch):
@@ -96,6 +102,25 @@ def label_tags(taxonomy, entry, current_model_name):
     return tags + [OWN_LABEL_TAG] if entry.get("label") else tags
 
 
+def role_tags(role):
+    return [ROLE_TAG + role] if role and role != NO_ROLE else []
+
+
+def current_role(item):
+    roles = [tag[len(ROLE_TAG):] for tag in item.get("tags") or [] if tag.startswith(ROLE_TAG)]
+    return roles[0] if len(roles) == 1 else None
+
+
+def merged_tags(taxonomy, entry, item):
+    """Tags are written as one list, so a change to the label keeps the role and a change to the role keeps
+    the label."""
+    if "label" in entry:
+        labels = label_tags(taxonomy, entry, item["part_detail"]["name"])
+    else:
+        labels = [tag for tag in item.get("tags") or [] if tag.startswith(LABEL_TAG) or tag == OWN_LABEL_TAG]
+    return labels + role_tags(entry["role"] if "role" in entry else current_role(item))
+
+
 def is_stock(entry):
     """A quantity of identical small parts, one stock item without a serial number or a label."""
     return "quantity" in entry
@@ -123,7 +148,7 @@ def add_assets(batch, taxonomy, client):
         body = {**item_body(entry, parts, locations, items), "quantity": 1, "serial_numbers": entry["id"]}
         created = client.post("/api/stock/", body)
         item = created[0] if isinstance(created, list) else created
-        client.patch(f"/api/stock/{item['pk']}/", {"tags": label_tags(taxonomy, entry, None)})
+        client.patch(f"/api/stock/{item['pk']}/", {"tags": label_tags(taxonomy, entry, None) + role_tags(entry.get("role"))})
         items[entry["id"]] = item
         lines.append(f"+ {entry['id']} {entry['model']}")
     for entry in batch:
@@ -166,8 +191,8 @@ def update_assets(batch, taxonomy, client):
         item = items[entry["id"]]
         body = item_body(entry, parts, locations, items)
         move_item(client, item, entry, body, items)
-        if "label" in entry:
-            body["tags"] = label_tags(taxonomy, entry, item["part_detail"]["name"])
+        if "label" in entry or "role" in entry:
+            body["tags"] = merged_tags(taxonomy, entry, item)
         client.patch(f"/api/stock/{item['pk']}/", body)
         lines.append(f"~ {entry['id']} {item['part_detail']['name']}: {', '.join(sorted(set(entry) - {'id'}))}")
     return lines
@@ -229,7 +254,8 @@ def plan_label_tags(taxonomy, client):
         wanted = label_size(taxonomy, model)
         if item_label_size(item) != wanted:
             changes.append(Change(f"~ {asset_id} {model['name']}: label {item_label_size(item)} -> {wanted}",
-                                  lambda pk=item["pk"], wanted=wanted: client.patch(f"/api/stock/{pk}/", {"tags": [LABEL_TAG + wanted]})))
+                                  lambda pk=item["pk"], tags=[LABEL_TAG + wanted] + role_tags(current_role(item)):
+                                  client.patch(f"/api/stock/{pk}/", {"tags": tags})))
     return changes
 
 
@@ -243,6 +269,8 @@ def check_items(client):
     for asset_id, item in sorted(remote_items(client).items()):
         if item_label_size(item) is None:
             lines.append(f"! {asset_id}: needs exactly one label tag, has {item.get('tags')}")
+        if sum(tag.startswith(ROLE_TAG) for tag in item.get("tags") or []) > 1:
+            lines.append(f"! {asset_id}: has more than one role tag, {item.get('tags')}")
         if item.get("purchase_price") and item.get("purchase_price_currency") != "EUR":
             lines.append(f"! {asset_id}: value is in {item.get('purchase_price_currency')}, not EUR")
     return lines
@@ -256,5 +284,5 @@ def list_assets(client):
     for asset_id, item in sorted(items.items()):
         where = f"in {by_pk.get(item['belongs_to'], item['belongs_to'])}" if item.get("belongs_to") else locations.get(item.get("location"), "-")
         lines.append(f"{asset_id}  {item['part_detail']['name']}\n    {where}  {item.get('status_text')}  "
-                     f"value {item.get('purchase_price') or '-'}  label {item_label_size(item)}")
+                     f"value {item.get('purchase_price') or '-'}  label {item_label_size(item)}  role {current_role(item) or '-'}")
     return lines

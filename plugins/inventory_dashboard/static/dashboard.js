@@ -170,16 +170,22 @@ function resourceSummary(resource) {
         `${uncapped}, weight ${Math.round(resource.weight * 100)}%`;
 }
 
+const ROLES = { os: "OS drive, not counted", cluster: "cluster storage", data: "data drive", array: "private array" };
+const STORAGE = ["storage_tb", "storage_speed"];
+
 function resourceParts(parts, resource) {
+    const storage = STORAGE.includes(resource);
     const rows = parts.filter((part) => part.figures?.[resource]).map((part) => {
         const own = part.scores?.[resource];
         const uncapped = part.uncapped_scores?.[resource];
         const ownText = own === undefined ? "no watts of its own" : `${points(own)}${uncapped ? ` (${points(uncapped)} uncapped)` : ""}`;
         const row = [partLink(part), escape(part.part), escape(figureText(resource, part.figures[resource])), watts(part.average_w), ownText];
-        return resource === "storage_speed" ? [...row, partCap(part)] : row;
+        const role = escape(ROLES[part.role] ?? "no role");
+        return resource === "storage_speed" ? [...row, role, partCap(part)] : storage ? [...row, role] : row;
     });
     const headers = ["Asset", "Part", "Brings", "Average", "Its own score"];
-    return rows.length ? table(resource === "storage_speed" ? [...headers, "Port"] : headers, rows, [3, 4])
+    const withRole = storage ? [...headers, "Role"] : headers;
+    return rows.length ? table(resource === "storage_speed" ? [...withRole, "Port"] : withRole, rows, [3, 4])
         : `<p style="opacity: 0.7; font-size: 0.85em; margin: 2px 0">Nothing in this machine has it.</p>`;
 }
 
@@ -299,8 +305,9 @@ function scoreNote(scale) {
         `of the best of its kind you owned on ${escape(scale.set ?? "")}: the best part for a part, the best machine for a machine. ` +
         `100 is that one and there is no upper limit. Efficiency is the figure per average ` +
         `watt (idle plus ${share}% of the way to load; speeds count at ${share}% use, capacities in full). A machine scores the ` +
-        `weighted geometric mean of its resources by profile (a resource it lacks counts as 1), a location the mean of its machines ` +
-        `by watts. A drive counts at most at the speed of its port. References: ${escape(references)}.</p>`;
+        `weighted geometric mean of its resources by profile (a resource it lacks is left out), a location the mean of its machines ` +
+        `by watts. A drive counts at most at the speed of its port; an OS drive holds the system and adds no storage. ` +
+        `References: ${escape(references)}.</p>`;
 }
 
 export function renderEfficiencyMenu(target, data) {
@@ -313,8 +320,9 @@ export function renderEfficiencyMenu(target, data) {
         const [first, ...rest] = powerRow(row, cell(`<a href="${row.url}" style="color: inherit">${escape(row.name)}</a>`, row.name));
         return [first, cell(escape(row.profile ?? "-"), row.profile ?? ""), ...rest];
     }), [2, 7]);
-    const locations = sortableTable(["Location", ...POWER_HEADERS], (context.locations ?? []).map((row) =>
-        powerRow(row, cell(escape(row.name), row.name))), [1, 6]);
+    const locations = sortableTable(["Location", ...POWER_HEADERS, "Cluster storage"], (context.locations ?? []).map((row) =>
+        [...powerRow(row, cell(escape(row.name), row.name)), cell(row.cluster_tb ? `${amount(row.cluster_tb)} TB` : "-", row.cluster_tb ?? 0)]),
+        [1, 6, 7]);
     const details = (context.machines ?? []).filter((row) => row.resources?.length).map((row) =>
         `<details style="margin: 4px 0"><summary><b>${escape(row.name)}</b>, score ${points(row.score)}, ${watts(row.average_w)} average` +
         `${row.capped ? ", storage capped by its ports" : ""}</summary>${resourceDetails(row)}</details>`).join("");
@@ -337,7 +345,8 @@ export function renderAttentionMenu(target, data) {
 }
 
 function machineNode(node) {
-    const facts = [money(node.value), node.average_w ? watts(node.average_w) : "", node.score ? `score ${node.score}` : ""]
+    const facts = [node.role ? ROLES[node.role] ?? node.role : "", money(node.value), node.average_w ? watts(node.average_w) : "",
+        node.score ? `score ${points(node.score)}` : ""]
         .filter(Boolean).join(" &middot; ");
     const line = `${link(node)} ${escape(node.name)} <span style="opacity: 0.7">${facts}</span>`;
     if (!node.children?.length) {
