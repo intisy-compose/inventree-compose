@@ -142,15 +142,13 @@ def average_power(idle_w, load_w, utilisation):
     return idle_w + utilisation * (load_w - idle_w)
 
 
-PART_LEVEL = "part"
-MACHINE_LEVEL = "machine"
+OVERHEAD = "overhead"
 
 
-def percent_score(efficiency, reference, level):
-    """Percent of the reference: 100 is as efficient as the best part (or machine) of its kind owned when the
-    reference was set, 200 twice as efficient. No upper limit, so better hardware later simply scores higher.
-    Parts and machines have their own reference, since a machine pays for its board, fans and supply too."""
-    return round(100 * efficiency / reference[level], 1)
+def percent_score(efficiency, reference):
+    """Percent of the reference: 100 is as efficient as the best part of its kind owned when the reference was
+    set, 200 twice as efficient. No upper limit, so better hardware later simply scores higher."""
+    return round(100 * efficiency / reference["part"], 1)
 
 
 def log_score(efficiency, reference):
@@ -267,25 +265,53 @@ def efficiency_of(resource, figure, utilisation, average):
     return used / average if average > 0 else 0.0
 
 
-def resource_row(resource, figure, reference, utilisation, average, level=MACHINE_LEVEL):
+def resource_row(resource, figure, reference, utilisation, average):
     efficiency = efficiency_of(resource, figure, utilisation, average)
     return {"figure": round(figure, 2), "efficiency": round(efficiency, 4),
-            "score": percent_score(efficiency, reference, level) if figure else None}
+            "score": percent_score(efficiency, reference) if figure else None}
 
 
-def resource_scores(found, config, profile, utilisation, average):
-    """Each weighted resource as percent of its reference, from its figure per average watt. A capped storage
-    speed also shows what it would score uncapped."""
+def component_score(parts, resource, uncapped=False):
+    """A machine's score for a resource comes from the parts that provide it, each on its own watts, weighted by
+    how much of the resource it brings: four good RAM sticks score as good RAM in any machine. An OS drive
+    adds no storage, so it does not count here either."""
+    scores_key, figures_key = ("uncapped_scores", "uncapped") if uncapped else ("scores", "figures")
+    weighted = []
+    for part in parts:
+        if resource not in part["figures"] or (part["role"] == OS_ROLE and resource in STORAGE_RESOURCES):
+            continue
+        score = part[scores_key].get(resource, part["scores"].get(resource))
+        figure = part[figures_key].get(resource, part["figures"][resource])
+        if score is not None:
+            weighted.append((score, figure))
+    total = sum(figure for _, figure in weighted)
+    return round(sum(score * figure for score, figure in weighted) / total, 1) if total else None
+
+
+def overhead_row(parts, average, weight):
+    """What a machine burns besides the parts that do its work (board, fans, coolers, supply loss): the share of
+    its watts that go to working parts, in percent, so 100 is a machine without overhead."""
+    working = sum(part["average_w"] for part in parts if part["figures"])
+    share = min(1.0, working / average) if average > 0 else 0.0
+    return {"resource": OVERHEAD, "weight": weight, "figure": round(share, 3), "overhead_w": round(max(0.0, average - working), 1),
+            "score": round(100 * share, 1) if working else None}
+
+
+def resource_scores(found, parts, config, profile, average):
+    """Each weighted resource from its parts, and the overhead. A capped storage speed also shows what it
+    would score uncapped."""
     rows = []
     for resource, weight in config["profiles"][profile].items():
         if not weight:
             continue
-        reference = config["resources"][resource]
-        row = {"resource": resource, "weight": weight, **resource_row(resource, found.resource(resource), reference, utilisation, average)}
+        if resource == OVERHEAD:
+            rows.append(overhead_row(parts, average, weight))
+            continue
+        row = {"resource": resource, "weight": weight, "figure": round(found.resource(resource), 2),
+               "score": component_score(parts, resource)}
         uncapped = found.resource(resource, uncapped=True)
         if uncapped > found.resource(resource):
-            uncapped_row = resource_row(resource, uncapped, reference, utilisation, average)
-            row.update({"uncapped_figure": uncapped_row["figure"], "uncapped_score": uncapped_row["score"]})
+            row.update({"uncapped_figure": round(uncapped, 2), "uncapped_score": component_score(parts, resource, uncapped=True)})
         rows.append(row)
     return rows
 
@@ -293,7 +319,7 @@ def resource_scores(found, config, profile, utilisation, average):
 def scored(figures, config, utilisation, average):
     if average <= 0:
         return {}
-    return {resource: resource_row(resource, figure, config["resources"][resource], utilisation, average, PART_LEVEL)["score"]
+    return {resource: resource_row(resource, figure, config["resources"][resource], utilisation, average)["score"]
             for resource, figure in figures.items()}
 
 
@@ -320,14 +346,15 @@ def weighted_score(rows):
 
 
 def summary(name, found, config, utilisation, measured=None, on_share=1.0, profile=None):
-    """Watts and score of a machine or location. The score is the weighted mean of its resources' scores,
-    weights by the machine's profile (its role). A machine switched off part of the time (`on_share`) draws
-    that much less on average; its score is taken while it is on, so switching it off does not make it look
-    more efficient."""
+    """Watts and score of a machine or location. The score is the weighted mean of its resources' scores and
+    its overhead, weights by the machine's profile (its role). A machine switched off part of the time
+    (`on_share`) draws that much less on average; its score is taken while it is on, so switching it off does
+    not make it look more efficient."""
     average = found.average_w(utilisation)
     job = job_of(found)
     profile = profile or job
-    resources = resource_scores(found, config, profile, utilisation, average) if profile and average > 0 else []
+    parts = part_scores(found.parts, config, utilisation)
+    resources = resource_scores(found, parts, config, profile, average) if profile and average > 0 else []
     score = weighted_score(resources)
     figures = {resource: round(found.resource(resource), 2) for resource in RESOURCES if found.resource(resource)}
     return {"name": name, "job": job, "profile": profile, "resources": resources, "figures": figures,
@@ -335,7 +362,7 @@ def summary(name, found, config, utilisation, measured=None, on_share=1.0, profi
             "average_w": round(average * on_share, 1), "on_share": on_share, "load_w": round(found.wall_load_w, 1),
             "loss_w": round(found.loss_idle_w + utilisation * (found.loss_load_w - found.loss_idle_w), 1),
             "cpu_mark": round(found.cpu_mark), "terabytes": round(found.terabytes, 1), "score": score,
-            "measured": measured, "parts": part_scores(found.parts, config, utilisation)}
+            "measured": measured, "parts": parts}
 
 
 class Inventory:
@@ -406,16 +433,19 @@ def host_machines(inventory):
 
 
 def machine_summaries(inventory, config, within=None):
-    """Every powered machine, or only those whose pk is in `within`."""
+    """Every powered machine, or only those whose pk is in `within`. `parent` is the machine it is built into,
+    such as a Pi in the Pi cluster."""
     rows = []
-    for host in host_machines(inventory):
+    hosts = host_machines(inventory)
+    host_pks = {host.pk for host in hosts}
+    for host in hosts:
         if within is not None and host.pk not in within:
             continue
         name = f"{host.serial} {host.part}"
         rows.append({**summary(name, totals([host, *inventory.installed_in(host)], inventory.parameters_of), config,
                                utilisation_of(host.serial, config), measured_of(host.serial, config),
                                on_share_of(host.serial, config), profile_of(host.serial, config) or default_profile(host)),
-                     "pk": host.pk})
+                     "pk": host.pk, "parent": host.belongs_to if host.belongs_to in host_pks else None})
     return [row for row in rows if row["average_w"] > 0]
 
 
@@ -465,5 +495,5 @@ def part_resource_scores(asset, parameters, config):
     if idle is None and load is None:
         return {}
     average = average_power(idle or 0.0, load if load is not None else idle, config["utilisation"])
-    return {resource: resource_row(resource, figure, config["resources"][resource], config["utilisation"], average, PART_LEVEL)
+    return {resource: resource_row(resource, figure, config["resources"][resource], config["utilisation"], average)
             for resource, figure in part_figures(asset, parameters).items()}

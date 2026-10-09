@@ -147,12 +147,6 @@ class InventoryDashboardPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugi
         return {"key": key, "title": title, "description": title, "icon": icon,
                 "source": self.plugin_static_file(f"dashboard.js:{function}"), "context": data}
 
-    def get_ui_navigation_items(self, request, context, **kwargs):
-        """The menus open as tabs on the Stock page above every location, since a plugin cannot add a page of
-        its own to the app."""
-        return [{"key": f"menu-{key}", "title": title, "icon": icon, "options": {"url": f"/stock/location/index/{key}"}}
-                for key, title, icon, _ in MENUS]
-
     def menu_panels(self, inventory, config, pk):
         scope = menus.Scope(inventory, pk)
         data = {"value": lambda: menus.value_menu(scope), "efficiency": lambda: menus.efficiency_menu(scope, config),

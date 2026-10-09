@@ -125,6 +125,7 @@ def validate_reference(reference, context):
 
 RESOURCES = ("cpu", "ram_size", "ram_speed", "storage_tb", "storage_speed", "gpu", "vram")
 DEFAULT_PROFILES = ("compute", "storage", "enclosure")
+OVERHEAD = "overhead"
 
 
 def validate_profiles(power):
@@ -132,17 +133,16 @@ def validate_profiles(power):
     by default exist."""
     for resource in RESOURCES:
         reference = power.get("resources", {}).get(resource)
-        if not (isinstance(reference, dict) and all(isinstance(reference.get(level), (int, float)) and reference[level] > 0
-                                                    for level in ("part", "machine"))):
-            raise CatalogError(f"[power] resources.{resource}: needs part and machine, the efficiencies that score 100")
+        if not (isinstance(reference, dict) and isinstance(reference.get("part"), (int, float)) and reference["part"] > 0):
+            raise CatalogError(f"[power] resources.{resource}: needs part, the efficiency that scores 100")
     profiles = power.get("profiles", {})
     for name in DEFAULT_PROFILES:
         if name not in profiles:
             raise CatalogError(f"[power] profiles: '{name}' is needed, machines get it by default")
     for name, weights in profiles.items():
-        unknown = set(weights) - set(RESOURCES)
+        unknown = set(weights) - set(RESOURCES + (OVERHEAD,))
         if unknown or not all(isinstance(weight, (int, float)) and weight >= 0 for weight in weights.values()) or not sum(weights.values()):
-            raise CatalogError(f"[power] profile '{name}': weights of {', '.join(RESOURCES)}, none negative, not all 0")
+            raise CatalogError(f"[power] profile '{name}': weights of {', '.join(RESOURCES + (OVERHEAD,))}, none negative, not all 0")
     for name, machine in power.get("machines", {}).items():
         if "profile" in machine and machine["profile"] not in profiles:
             raise CatalogError(f"[power] machine '{name}': unknown profile '{machine['profile']}'")
