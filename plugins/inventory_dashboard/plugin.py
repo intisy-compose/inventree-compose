@@ -8,9 +8,9 @@ from django.db.models import Count, Q, Sum
 from plugin import InvenTreePlugin
 from plugin.mixins import SettingsMixin, UserInterfaceMixin
 
-from . import power
+from . import menus, power
+from .menus import CONDITIONS, STICKER_KEY, condition_of
 
-CONDITIONS = {11: "Untested", 50: "Needs repair", 55: "Broken"}
 LABEL_SIZES = ("large", "standard", "small", "none")
 RECENT_COUNT = 8
 TOP_CATEGORIES = 10
@@ -40,10 +40,6 @@ def with_condition(items, key):
     return items.filter(Q(status_custom_key=key) | Q(status=key, status_custom_key__isnull=True))
 
 
-def condition_of(item):
-    return CONDITIONS.get(item.status_custom_key) or CONDITIONS.get(item.status)
-
-
 def attention():
     items = assets()
     counts = {label: with_condition(items, key).count() for key, label in CONDITIONS.items()}
@@ -67,7 +63,8 @@ def recent():
 def labels():
     items = assets()
     counts = {size: items.filter(tags__name=f"label-{size}").count() for size in LABEL_SIZES}
-    return {"counts": counts, "untagged": items.count() - sum(counts.values())}
+    stuck = sum(bool((metadata or {}).get(STICKER_KEY)) for metadata in items.values_list("metadata", flat=True))
+    return {"counts": counts, "untagged": items.count() - sum(counts.values()), "stuck": stuck}
 
 
 def power_inventory():
@@ -84,6 +81,15 @@ def power_inventory():
     inventory_assets = [power.Asset(row["serial"], row["pk"], row["part__name"], row["part__category__name"] or "",
                                     row["location_id"], row["belongs_to_id"]) for row in rows]
     return power.Inventory(inventory_assets, locations, parameters)
+
+
+MENUS = (
+    ("value", "Value", "ti:currency-euro:outline", "renderValueMenu"),
+    ("efficiency", "Efficiency", "ti:bolt:outline", "renderEfficiencyMenu"),
+    ("attention", "Attention", "ti:alert-triangle:outline", "renderAttentionMenu"),
+    ("machines", "Machines", "ti:server:outline", "renderMachinesMenu"),
+    ("stickers", "Stickers", "ti:sticker:outline", "renderStickersMenu"),
+)
 
 
 class InventoryDashboardPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
@@ -135,20 +141,40 @@ class InventoryDashboardPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugi
         return [self.widget("power", "Power and efficiency", "Watts and score of every machine and location", "renderPower",
                             data, width=8, height=5)]
 
-    def panel(self, key, title, function, data):
-        return {"key": key, "title": title, "description": title, "icon": "ti:bolt:outline",
+    def panel(self, key, title, function, data, icon="ti:bolt:outline"):
+        return {"key": key, "title": title, "description": title, "icon": icon,
                 "source": self.plugin_static_file(f"dashboard.js:{function}"), "context": data}
+
+    def get_ui_navigation_items(self, request, context, **kwargs):
+        """The menus open as tabs on the outermost location, since a plugin cannot add a page of its own to the app."""
+        from stock.models import StockLocation
+
+        root = StockLocation.objects.filter(parent__isnull=True).order_by("pk").first()
+        if root is None:
+            return []
+        return [{"key": f"menu-{key}", "title": title, "icon": icon, "options": {"url": f"/stock/location/{root.pk}/{key}"}}
+                for key, title, icon, _ in MENUS]
+
+    def menu_panels(self, inventory, config, pk):
+        scope = menus.Scope(inventory, pk)
+        data = {"value": lambda: menus.value_menu(scope), "efficiency": lambda: menus.efficiency_menu(scope, config),
+                "attention": lambda: menus.attention_menu(scope), "machines": lambda: menus.machines_menu(scope, config),
+                "stickers": lambda: menus.sticker_menu(scope)}
+        return [self.panel(key, title, function, data[key](), icon) for key, title, icon, function in MENUS]
 
     def get_ui_panels(self, request, context, **kwargs):
         config = self.power_config()
         target, pk = context.get("target_model"), context.get("target_id")
-        if config is None or pk is None:
+        if pk is None:
             return []
         inventory = power_inventory()
+        if target == "stocklocation":
+            power_panels = self.location_panel(inventory, config, int(pk)) if config else []
+            return power_panels + self.menu_panels(inventory, config, int(pk))
+        if config is None:
+            return []
         if target == "stockitem":
             return self.machine_panel(inventory, config, int(pk))
-        if target == "stocklocation":
-            return self.location_panel(inventory, config, int(pk))
         if target == "part":
             return self.part_panel(inventory, config, int(pk))
         return []
