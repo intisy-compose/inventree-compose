@@ -22,6 +22,9 @@ CAPACITY = "Capacity (GB)"
 RAM = "RAM (GB)"
 RAM_SPEED = "Speed (MT/s)"
 SEQUENTIAL_READ = "Sequential read (MB/s)"
+LINK_SPEED = "Link speed (MB/s)"
+ENCLOSURE_CATEGORY = "Drive enclosures"
+ENCLOSURE_PROFILE = "enclosure"
 SUPPLY_CATEGORY = "Power supplies"
 DRIVE_CATEGORY = "Storage drives"
 MEMORY_CATEGORY = "Memory"
@@ -63,14 +66,16 @@ class Totals:
         return {"cpu": self.cpu_mark, "ram_size": self.ram_gb, "ram_speed": self.ram_speed or 0.0,
                 "storage_tb": self.terabytes, "storage_speed": self.storage_speed, "gpu": self.gpu, "vram": self.vram}[name]
 
-    def add_figures(self, asset, parameters):
+    def add_figures(self, asset, parameters, link_speed=None):
+        """`link_speed` is what the enclosure the part sits in can carry: a drive reads no faster than that."""
         if asset.category == MEMORY_CATEGORY:
             self.ram_gb += number(parameters, CAPACITY) or 0.0
         self.ram_gb += number(parameters, RAM) or 0.0
         speed = number(parameters, RAM_SPEED)
         if speed and asset.category in (MEMORY_CATEGORY, COMPUTER_CATEGORY):
             self.ram_speed = min(self.ram_speed or speed, speed)
-        self.storage_speed = max(self.storage_speed, number(parameters, SEQUENTIAL_READ) or 0.0)
+        read = number(parameters, SEQUENTIAL_READ) or 0.0
+        self.storage_speed = max(self.storage_speed, min(read, link_speed) if link_speed else read)
         self.gpu = max(self.gpu, number(parameters, G3D_MARK) or 0.0)
         self.vram = max(self.vram, number(parameters, VRAM) or 0.0)
         self.cpu_mark += number(parameters, CPU_MARK) or 0.0
@@ -168,12 +173,13 @@ def totals(assets, parameters_of):
     """Sums the parts' watts and figures; the supplies among them share the load by rated wattage."""
     result = Totals()
     supplies = []
+    links = {asset.pk: number(parameters_of(asset.part), LINK_SPEED) for asset in assets}
     for asset in assets:
         parameters = parameters_of(asset.part)
         if asset.category == SUPPLY_CATEGORY:
             supplies.append(parameters)
             continue
-        result.add_figures(asset, parameters)
+        result.add_figures(asset, parameters, links.get(asset.belongs_to))
         idle, load = number(parameters, IDLE), number(parameters, LOAD)
         if idle is None and load is None:
             continue
@@ -272,6 +278,12 @@ def utilisation_of(name, config):
     return machine.get("utilisation", config["utilisation"])
 
 
+def default_profile(host):
+    """An enclosure only holds and connects drives, so its CPU and RAM do not count; other machines get their
+    profile from their main job."""
+    return ENCLOSURE_PROFILE if host.category == ENCLOSURE_CATEGORY else None
+
+
 def profile_of(name, config):
     return config.get("machines", {}).get(name, {}).get("profile")
 
@@ -298,7 +310,8 @@ def machine_summaries(inventory, config, within=None):
         name = f"{host.serial} {host.part}"
         rows.append({**summary(name, totals([host, *inventory.installed_in(host)], inventory.parameters_of), config,
                                utilisation_of(host.serial, config), measured_of(host.serial, config),
-                               on_share_of(host.serial, config), profile_of(host.serial, config)), "pk": host.pk})
+                               on_share_of(host.serial, config), profile_of(host.serial, config) or default_profile(host)),
+                     "pk": host.pk})
     return [row for row in rows if row["average_w"] > 0]
 
 

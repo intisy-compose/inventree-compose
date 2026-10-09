@@ -124,7 +124,7 @@ def validate_reference(reference, context):
 
 
 RESOURCES = ("cpu", "ram_size", "ram_speed", "storage_tb", "storage_speed", "gpu", "vram")
-DEFAULT_PROFILES = ("compute", "storage")
+DEFAULT_PROFILES = ("compute", "storage", "enclosure")
 
 
 def validate_profiles(power):
