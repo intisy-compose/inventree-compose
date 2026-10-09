@@ -347,12 +347,12 @@ def sheet_box():
     return SHEET_MARGIN_MM, SHEET_MARGIN_MM, PAGE_SIZE_MM[0] - SHEET_MARGIN_MM, PAGE_SIZE_MM[1] - SHEET_MARGIN_MM
 
 
-def sheets_pdf(labels, outline, sheet="full", grouped=False):
+def sheets_pdf(labels, outline, sheet="full", grouped=False, touching=False):
     """The whole print job as PDF bytes, and a summary line. `grouped` outlines every location and machine,
-    opened by its name tag."""
+    opened by its name tag; `touching` puts the labels of one group edge to edge."""
     sequence = flow_sequence(labels, grouped, TAG_MAX_WIDTH_MM[sheet])
     pages = lay_out(sequence, cd_areas if sheet == "cd" else lambda: [FlatArea(*sheet_box())],
-                    continuation_maker(sequence, TAG_MAX_WIDTH_MM[sheet]))
+                    continuation_maker(sequence, TAG_MAX_WIDTH_MM[sheet]), touching)
     contents = [sheet_content([(slot, entry_drawing(entry)) for slot, entry in placed], outline and sheet == "cd", outlines)
                 for placed, outlines in pages]
     tags = sum(isinstance(entry, NameTag) for placed, _ in pages for _, entry in placed)

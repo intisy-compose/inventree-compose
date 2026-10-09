@@ -14,11 +14,14 @@ from .outlines import Rect, flat_path, ring_path, union_outline
 
 TOLERANCE = 1e-6
 LABEL_GAP_MM = 1.0
+TOUCHING_GAP_MM = 0.0
 OUTLINE_MARGIN_MM = 0.8
 OUTLINE_STEP_MM = 0.8
 OUTLINE_CLEARANCE_MM = 1.2
 MIN_BRIDGE_MM = 2.0
 MAX_RELAYOUTS = 60
+ROW_BREAK = "row"
+AREA_BREAK = "area"
 
 
 @dataclass
@@ -51,10 +54,10 @@ def shared_depth(first, second):
     return depth
 
 
-def column_gap(first, second):
-    """Room between neighbours: 1 mm inside one group, otherwise every outline between them and clearance."""
+def column_gap(first, second, label_gap):
+    """Room between neighbours: the label gap inside one group, otherwise every outline between them and clearance."""
     if first == second:
-        return LABEL_GAP_MM
+        return label_gap
     shared = shared_depth(first, second)
     return growth(len(first) - shared) + growth(len(second) - shared) + OUTLINE_CLEARANCE_MM
 
@@ -64,6 +67,7 @@ class Column:
     """Items of one group stacked in sub-rows inside one column of a row."""
     x: float
     chain: tuple
+    gap: float
     width: float = 0.0
     placed: list = field(default_factory=list)
     row_top: float = 0.0
@@ -72,13 +76,13 @@ class Column:
 
     def take(self, entry, reach, row_height, room_right):
         """Places the entry beside the last one or in a new sub-row below; False when neither fits."""
-        if self.placed and self.row_x + LABEL_GAP_MM + entry.width <= self.width + TOLERANCE \
+        if self.placed and self.row_x + self.gap + entry.width <= self.width + TOLERANCE \
                 and self.row_top + reach <= row_height + TOLERANCE:
-            self.placed.append((self.row_x + LABEL_GAP_MM, self.row_top, entry))
-            self.row_x += LABEL_GAP_MM + entry.width
+            self.placed.append((self.row_x + self.gap, self.row_top, entry))
+            self.row_x += self.gap + entry.width
             self.row_height = max(self.row_height, reach)
             return True
-        top = self.row_top + self.row_height + LABEL_GAP_MM if self.placed else 0.0
+        top = self.row_top + self.row_height + self.gap if self.placed else 0.0
         if top + reach > row_height + TOLERANCE or entry.width > max(self.width, room_right) + TOLERANCE:
             return False
         self.placed.append((0.0, top, entry))
@@ -112,11 +116,12 @@ class Box:
 
 
 class Flow:
-    """The layout of one print job: the sequence, the groups' chains, the forced row breaks."""
+    """The layout of one print job: the sequence, the groups' chains, the gap between labels of one group."""
 
-    def __init__(self, sequence, continuation):
+    def __init__(self, sequence, continuation, label_gap=LABEL_GAP_MM):
         self.sequence = sequence
         self.continuation = continuation
+        self.label_gap = label_gap
         self.group_chains = {}
         for item in sequence:
             for depth, key in enumerate(item.chain):
@@ -145,7 +150,7 @@ class Flow:
         return boxes + [Box(left, right, vertical, vertical, group=key) for key, (left, right, vertical) in extents.items()]
 
     def row_gap(self, above, below):
-        gap = LABEL_GAP_MM
+        gap = self.label_gap
         for upper in self.row_boxes(above):
             for lower in self.row_boxes(below):
                 overlapping = upper.left < lower.right + OUTLINE_CLEARANCE_MM and lower.left < upper.right + OUTLINE_CLEARANCE_MM
@@ -170,11 +175,11 @@ class Flow:
             if self.stack(columns, item, reach, row_height, area.width):
                 index += 1
                 continue
-            x = growth(len(item.chain)) if last is None else last.right + column_gap(last.chain, item.chain)
+            x = growth(len(item.chain)) if last is None else last.right + column_gap(last.chain, item.chain, self.label_gap)
             if x + item.entry.width + growth(len(item.chain)) > area.width + TOLERANCE:
                 break
             row_height = max(row_height, reach)
-            column = Column(x, item.chain)
+            column = Column(x, item.chain, self.label_gap)
             column.take(item.entry, reach, row_height, item.entry.width)
             columns.append(column)
             index += 1
@@ -206,7 +211,7 @@ class Flow:
             reach = area.reach(item.entry)
             if (index != start and id(item) in forced) or reach > height_cap + TOLERANCE:
                 break
-            x = growth(len(item.chain)) if x is None else x + column_gap(chain, item.chain)
+            x = growth(len(item.chain)) if x is None else x + column_gap(chain, item.chain, self.label_gap)
             if x + item.entry.width + growth(len(item.chain)) > area.width + TOLERANCE:
                 break
             x += item.entry.width
@@ -233,7 +238,7 @@ class Flow:
                 row = None
                 if cap <= 0:
                     break
-            if row is None:
+            if row is None or (rows and forced.get(id(sequence[index])) == AREA_BREAK):
                 break
             row.top = bottom + gap
             bottom = row.top + row.height
@@ -261,7 +266,8 @@ class Flow:
                 chain = self.open_group(sequence, index) if index > 0 else ()
                 if chain:
                     sequence.insert(index, FlowItem(self.continuation(chain, area.width - 2 * growth(len(chain))), chain))
-                breaks = forced - {id(sequence[index + 1])} if chain and index + 1 < len(sequence) else forced
+                exempt = id(sequence[index + 1]) if chain and index + 1 < len(sequence) else None
+                breaks = {key: kind for key, kind in forced.items() if key != exempt}
                 rows, next_index = self.fill_area(area, sequence, index, breaks)
                 if chain and next_index <= index + 1:
                     del sequence[index]
@@ -276,7 +282,8 @@ class Flow:
 
     def badly_started_openers(self, pages):
         """The tags of groups that fall apart in an area: their rows on consecutive lines do not touch, or their
-        first row holds nothing but the tag. Each then starts on a new row."""
+        first row holds nothing but the tag. Each then starts on a new row, or in the next area when it already
+        starts its row."""
         openers = []
         for page in pages:
             for _, rows in page.filled:
@@ -284,12 +291,15 @@ class Flow:
                     opener = next((item for item in self.items_in(rows, key) if item.opens == key), None)
                     if opener is None:
                         continue
-                    alone = len(spans) > 1 and self.entries_in_row(rows[spans[0][0]], key) == 1
+                    alone = self.entries_in_row(rows[spans[0][0]], key) == 1 < self.group_size(key)
                     apart = any(row_b == row_a + 1 and min(right_a, right_b) - max(left_a, left_b) < MIN_BRIDGE_MM
                                 for (row_a, left_a, right_a), (row_b, left_b, right_b) in zip(spans, spans[1:]))
                     if alone or apart:
                         openers.append(opener)
         return openers
+
+    def group_size(self, key):
+        return sum(key in item.chain for item in self.sequence)
 
     @staticmethod
     def entries_in_row(row, key):
@@ -338,17 +348,22 @@ class PageLayout:
             self.filled.append((area, rows))
 
 
-def lay_out(sequence, make_areas, continuation):
+def next_break(kind):
+    return {None: ROW_BREAK, ROW_BREAK: AREA_BREAK}.get(kind)
+
+
+def lay_out(sequence, make_areas, continuation, touching=False):
     """Pages of (placed entries, outlines): every entry as (slot, entry), every group outline as (group key,
-    area, polygons). A group that would fall apart into two pieces on consecutive rows starts on a new row."""
-    flow = Flow(sequence, continuation)
-    forced = set()
+    area, polygons). A group that would fall apart into two pieces on consecutive rows starts on a new row.
+    `touching` puts the labels of one group edge to edge, so neighbours share a cut."""
+    flow = Flow(sequence, continuation, TOUCHING_GAP_MM if touching else LABEL_GAP_MM)
+    forced = {}
     pages = flow.lay_out(make_areas, forced)
     for _ in range(MAX_RELAYOUTS):
-        opener = next((item for item in flow.badly_started_openers(pages) if id(item) not in forced), None)
+        opener = next((item for item in flow.badly_started_openers(pages) if next_break(forced.get(id(item)))), None)
         if opener is None:
             break
-        forced.add(id(opener))
+        forced[id(opener)] = next_break(forced.get(id(opener)))
         pages = flow.lay_out(make_areas, forced)
     result = []
     for page in pages:

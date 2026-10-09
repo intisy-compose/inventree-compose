@@ -78,6 +78,8 @@ class AssetLabelsPlugin(LabelPrintingMixin, InvenTreePlugin):
                                            help_text="CD label sheets only: for a test print against a sheet")
         groups = serializers.BooleanField(default=False, label="Outline groups",
                                           help_text="Outline every location and machine, opened by a name tag; groups go on across pages")
+        touching = serializers.BooleanField(default=False, label="Labels touch",
+                                            help_text="Labels of one group sit edge to edge and share their cut lines, so fewer cuts")
         installed = serializers.BooleanField(default=False, label="Include installed items",
                                              help_text="Also print everything installed in the selected items")
 
@@ -98,5 +100,6 @@ class AssetLabelsPlugin(LabelPrintingMixin, InvenTreePlugin):
         labels = self.labels_for(items, request, options.get("size", SIZE_FROM_TAG))
         if not labels:
             raise ValidationError("None of the selected items gets a label: they need a serial number and a size other than none")
-        pdf, _ = sheets_pdf(labels, bool(options.get("outline")), options.get("sheet", "full"), bool(options.get("groups")))
+        pdf, _ = sheets_pdf(labels, bool(options.get("outline")), options.get("sheet", "full"), bool(options.get("groups")),
+                            bool(options.get("touching")))
         output.mark_complete(progress=len(items), output=ContentFile(pdf, "asset-labels.pdf"))
