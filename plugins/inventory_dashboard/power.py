@@ -132,11 +132,18 @@ def average_power(idle_w, load_w, utilisation):
     return idle_w + utilisation * (load_w - idle_w)
 
 
-def scale_position(efficiency, reference):
-    """Where an efficiency sits against its fixed scale: below, within or above it."""
-    if efficiency < reference["low"]:
-        return "below"
-    return "above" if efficiency > reference["high"] else "within"
+MISSING_SCORE = 1.0
+
+
+PART_LEVEL = "part"
+MACHINE_LEVEL = "machine"
+
+
+def percent_score(efficiency, reference, level):
+    """Percent of the reference: 100 is as efficient as the best part (or machine) of its kind owned when the
+    reference was set, 200 twice as efficient. No upper limit, so better hardware later simply scores higher.
+    Parts and machines have their own reference, since a machine pays for its board, fans and supply too."""
+    return round(100 * efficiency / reference[level], 1)
 
 
 def log_score(efficiency, reference):
@@ -252,17 +259,15 @@ def efficiency_of(resource, figure, utilisation, average):
     return used / average if average > 0 else 0.0
 
 
-def resource_row(resource, figure, reference, utilisation, average):
+def resource_row(resource, figure, reference, utilisation, average, level=MACHINE_LEVEL):
     efficiency = efficiency_of(resource, figure, utilisation, average)
     return {"figure": round(figure, 2), "efficiency": round(efficiency, 4),
-            "score": log_score(efficiency, reference) if figure else 1,
-            "scale": scale_position(efficiency, reference) if figure else "below"}
+            "score": percent_score(efficiency, reference, level) if figure else None}
 
 
 def resource_scores(found, config, profile, utilisation, average):
-    """Each weighted resource scored on its own fixed log scale, as figure per average watt. A resource the
-    machine lacks scores 1: it cannot do that part. A capped storage speed also shows what it would score
-    uncapped."""
+    """Each weighted resource as percent of its reference, from its figure per average watt. A capped storage
+    speed also shows what it would score uncapped."""
     rows = []
     for resource, weight in config["profiles"][profile].items():
         if not weight:
@@ -280,9 +285,8 @@ def resource_scores(found, config, profile, utilisation, average):
 def scored(figures, config, utilisation, average):
     if average <= 0:
         return {}
-    rows = {resource: resource_row(resource, figure, config["resources"][resource], utilisation, average)
+    return {resource: resource_row(resource, figure, config["resources"][resource], utilisation, average, PART_LEVEL)["score"]
             for resource, figure in figures.items()}
-    return {resource: {"score": row["score"], "scale": row["scale"]} for resource, row in rows.items()}
 
 
 def part_scores(parts, config, utilisation):
@@ -298,8 +302,13 @@ def part_scores(parts, config, utilisation):
 
 
 def weighted_score(rows):
+    """The weighted geometric mean, so one resource far ahead of the rest (an NVMe drive per watt against a hard
+    drive) cannot swamp them. A resource the machine lacks counts as 1: it cannot do that part of the job."""
     total = sum(row["weight"] for row in rows)
-    return round(sum(row["score"] * row["weight"] for row in rows) / total) if total else None
+    if not total:
+        return None
+    logs = sum(row["weight"] * math.log(max(row["score"] or MISSING_SCORE, MISSING_SCORE)) for row in rows)
+    return round(math.exp(logs / total), 1)
 
 
 def summary(name, found, config, utilisation, measured=None, on_share=1.0, profile=None):
@@ -439,4 +448,14 @@ def power_weighted_score(machines):
     more than a 5 W Pi."""
     scored = [machine for machine in machines if machine["score"] is not None and machine["average_w"] > 0]
     watts = sum(machine["average_w"] for machine in scored)
-    return round(sum(machine["score"] * machine["average_w"] for machine in scored) / watts) if watts else None
+    return round(sum(machine["score"] * machine["average_w"] for machine in scored) / watts, 1) if watts else None
+
+
+def part_resource_scores(asset, parameters, config):
+    """A single part on the machine scales: each figure it brings over its own average watts."""
+    idle, load = number(parameters, IDLE), number(parameters, LOAD)
+    if idle is None and load is None:
+        return {}
+    average = average_power(idle or 0.0, load if load is not None else idle, config["utilisation"])
+    return {resource: resource_row(resource, figure, config["resources"][resource], config["utilisation"], average, PART_LEVEL)
+            for resource, figure in part_figures(asset, parameters).items()}

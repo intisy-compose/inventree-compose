@@ -131,7 +131,10 @@ def validate_profiles(power):
     """Every resource has a reference, every profile weighs known resources, and the profiles a machine gets
     by default exist."""
     for resource in RESOURCES:
-        validate_reference(power.get("resources", {}).get(resource), f"[power] resources.{resource}")
+        reference = power.get("resources", {}).get(resource)
+        if not (isinstance(reference, dict) and all(isinstance(reference.get(level), (int, float)) and reference[level] > 0
+                                                    for level in ("part", "machine"))):
+            raise CatalogError(f"[power] resources.{resource}: needs part and machine, the efficiencies that score 100")
     profiles = power.get("profiles", {})
     for name in DEFAULT_PROFILES:
         if name not in profiles:
