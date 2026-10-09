@@ -104,6 +104,22 @@ export function renderPower(target, data) {
         `score 1 to 100 on a log scale of work per average watt, with fixed references.</p>`);
 }
 
+const RESOURCES = {
+    cpu: ["CPU", "CPU Mark"], ram_size: ["RAM size", "GB"], ram_speed: ["RAM speed", "MT/s"],
+    storage_tb: ["Storage capacity", "TB"], storage_speed: ["Storage speed", "MB/s"], gpu: ["GPU", "G3D Mark"], vram: ["VRAM", "GB"],
+};
+
+function resourcesTable(resources) {
+    if (!resources?.length) {
+        return "";
+    }
+    return table(["Resource", "Figure", "Weight", "Score"], resources.map((row) => {
+        const [name, unit] = RESOURCES[row.resource] ?? [row.resource, ""];
+        const figure = row.figure ? `${Number(row.figure).toLocaleString("de-DE")} ${unit}` : "none";
+        return [escape(name), escape(figure), `${Math.round(row.weight * 100)}%`, score(row.score)];
+    }), [1, 2, 3]);
+}
+
 export function renderPowerPanel(target, data) {
     const row = data?.context ?? {};
     const stats = stat("idle", watts(row.idle_w)) + stat(`average at ${Math.round((row.utilisation ?? 0) * 100)}%`, watts(row.average_w)) +
@@ -111,7 +127,10 @@ export function renderPowerPanel(target, data) {
         stat("score", row.score ?? "-") + (row.measured ? stat("measured idle / load", measured(row)) : "");
     const parts = (row.parts ?? []).map((part) => [`<a href="/web/stock/item/${part.pk}" style="color: inherit">${escape(part.serial)}</a>`,
         escape(part.part), watts(part.idle_w), watts(part.load_w)]);
-    frame(target, stats + (parts.length ? table(["Asset", "Part", "Idle", "Load"], parts, [2, 3]) : ""));
+    const profile = row.profile ? `<p style="opacity: 0.7; font-size: 0.8em">Scored as ${escape(row.profile)}: the weighted mean ` +
+        `of each resource's score per average watt.</p>` : "";
+    frame(target, stats + profile + resourcesTable(row.resources) + "<br>" +
+        (parts.length ? table(["Asset", "Part", "Idle", "Load"], parts, [2, 3]) : ""));
 }
 
 export function renderPartPower(target, data) {
@@ -203,15 +222,19 @@ export function renderEfficiencyMenu(target, data) {
     const powerRow = (row, first) => [first, cell(watts(row.idle_w), row.idle_w), cell(watts(row.average_w), row.average_w),
         cell(watts(row.load_w), row.load_w), cell(work(row), row.cpu_mark || row.terabytes), cell(score(row.score), row.score ?? -1)];
     const headers = ["Idle", "Average", "Load", "Work", "Score"];
-    const machines = sortableTable(["Machine", ...headers], (context.machines ?? []).map((row) =>
-        powerRow(row, cell(`<a href="${row.url}" style="color: inherit">${escape(row.name)}</a>`, row.name))), [1, 2, 3, 4, 5]);
+    const machines = sortableTable(["Machine", "Profile", ...headers], (context.machines ?? []).map((row) => {
+        const [first, ...rest] = powerRow(row, cell(`<a href="${row.url}" style="color: inherit">${escape(row.name)}</a>`, row.name));
+        return [first, cell(escape(row.profile ?? "-"), row.profile ?? ""), ...rest];
+    }), [2, 3, 4, 5, 6]);
     const locations = sortableTable(["Location", ...headers], (context.locations ?? []).map((row) =>
         powerRow(row, cell(escape(row.name), row.name))), [1, 2, 3, 4, 5]);
     const parts = (context.machines ?? []).map((row) =>
-        `<details><summary>${escape(row.name)}</summary>${partsTable(row.parts ?? [])}</details>`).join("");
-    frame(target, heading("Machines") + machines + heading("Locations") + locations + heading("Parts of each machine") + parts +
-        `<p style="opacity: 0.7; font-size: 0.8em">Average at the server utilisation; score 1 to 100 on a log scale of work per ` +
-        `average watt, with fixed references.</p>`);
+        `<details><summary>${escape(row.name)}${row.score ? `, score ${row.score}` : ""}</summary>` +
+        `${resourcesTable(row.resources)}<br>${partsTable(row.parts ?? [])}</details>`).join("");
+    frame(target, heading("Machines") + machines + heading("Locations") + locations + heading("Each machine: its resources and parts") + parts +
+        `<p style="opacity: 0.7; font-size: 0.8em">Average at the server utilisation. Each resource is scored 1 to 100 on a log scale ` +
+        `of its figure per average watt (speeds at the utilisation, capacities in full), with fixed references; a machine's score is ` +
+        `their mean weighted by its profile, a location's the mean of its machines weighted by their watts.</p>`);
     enableSorting(target);
 }
 
