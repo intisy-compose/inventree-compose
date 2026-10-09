@@ -205,8 +205,10 @@ class InventoryDashboardPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugi
         asset = power.Asset("", 0, part.name, part.category.name if part.category else "", None, None)
         parameters = inventory.parameters_of(part.name)
         score = power.part_score(asset, parameters, config)
+        resources = power.part_resource_scores(asset, parameters, config)
         idle, load = power.number(parameters, power.IDLE), power.number(parameters, power.LOAD)
         if score is None and idle is None:
             return []
-        data = {"idle_w": idle, "load_w": load, "score": score, "source": parameters.get("Power source", "")}
+        data = {"idle_w": idle, "load_w": load, "score": None if resources else score, "resources": resources,
+                "utilisation": config["utilisation"], "source": parameters.get("Power source", "")}
         return [self.panel("power", "Power", "renderPartPower", data)]

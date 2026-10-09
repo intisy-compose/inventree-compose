@@ -103,7 +103,8 @@ def efficiency_menu(scope, config):
         row["url"] = f"/web/stock/item/{row['pk']}"
     return {"machines": sorted(machines, key=lambda row: row["name"].split(" ", 1)[-1]),
             "locations": power.location_summaries(scope.inventory, config, within=scope.location_pks),
-            "scale": {"utilisation": config["utilisation"], "resources": config["resources"], "profiles": config["profiles"]}}
+            "scale": {"utilisation": config["utilisation"], "resources": config["resources"], "profiles": config["profiles"],
+                      "set": config.get("references_set", "")}}
 
 
 def attention_menu(scope):
