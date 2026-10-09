@@ -61,8 +61,15 @@ starter `catalog.toml`; `CATALOG.md` in a data repo documents the rules.
 `plugins/inventory_dashboard` is a small InvenTree plugin, mounted into the server, with five
 dashboard widgets for this kind of inventory: an overview with value by category, what needs
 attention (untested, faulty, broken), the machines with their installed parts, the newest assets,
-and how many stickers of each size there are. `catalog sync`
+and how many stickers of each size there are (and how many are stuck on). `catalog sync`
 activates it; add the widgets from the dashboard menu.
+
+The same plugin adds five entries to the top menu, Value, Efficiency, Attention, Machines and
+Stickers, each a tab on the outermost location and on every location below it, scoped to that
+location: value by category, location and machine with every asset; watts and efficiency score of
+every machine and location; every untested, faulty or broken asset with its notes; every machine
+with its installed parts; and a checklist of every sticker to tick off once it is stuck on. A tick
+is saved in the item's metadata (`sticker`, the date), not in the catalog.
 
 ## Printing labels from InvenTree
 

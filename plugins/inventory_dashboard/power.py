@@ -199,12 +199,17 @@ class Inventory:
             pending.extend(child.pk for child in children)
         return found
 
-    def location_and_below(self, location_pk):
+    def locations_below(self, location_pk):
+        """The location and every location inside it, as pks."""
         wanted, pending = set(), [location_pk]
         while pending:
             pk = pending.pop()
             wanted.add(pk)
             pending.extend(child for child, row in self.locations.items() if row["parent"] == pk)
+        return wanted
+
+    def location_and_below(self, location_pk):
+        wanted = self.locations_below(location_pk)
         placed = [asset for asset in self.assets if asset.location in wanted and asset.belongs_to is None]
         return placed + [part for asset in placed for part in self.installed_in(asset)]
 
@@ -230,12 +235,16 @@ def host_machines(inventory):
     return [asset for asset in inventory.assets if any(other.belongs_to == asset.pk for other in inventory.assets)]
 
 
-def machine_summaries(inventory, config):
+def machine_summaries(inventory, config, within=None):
+    """Every powered machine, or only those whose pk is in `within`."""
     rows = []
     for host in host_machines(inventory):
+        if within is not None and host.pk not in within:
+            continue
         name = f"{host.serial} {host.part}"
-        rows.append(summary(name, totals([host, *inventory.installed_in(host)], inventory.parameters_of), config,
-                            utilisation_of(host.serial, config), measured_of(host.serial, config), on_share_of(host.serial, config)))
+        rows.append({**summary(name, totals([host, *inventory.installed_in(host)], inventory.parameters_of), config,
+                               utilisation_of(host.serial, config), measured_of(host.serial, config),
+                               on_share_of(host.serial, config)), "pk": host.pk})
     return [row for row in rows if row["average_w"] > 0]
 
 
@@ -252,12 +261,14 @@ def powered_assets(inventory, config):
     return powered
 
 
-def location_summaries(inventory, config):
-    """Every location with powered parts below it: total work over total average power, so a 300 W server
-    weighs more than a 5 W Pi."""
+def location_summaries(inventory, config, within=None):
+    """Every location with powered parts below it, or only those whose pk is in `within`: total work over
+    total average power, so a 300 W server weighs more than a 5 W Pi."""
     powered = powered_assets(inventory, config)
     rows = []
     for pk, row in sorted(inventory.locations.items(), key=lambda entry: entry[1]["pathstring"]):
+        if within is not None and pk not in within:
+            continue
         below = [asset for asset in inventory.location_and_below(pk) if asset.pk in powered]
         found = totals(below, inventory.parameters_of)
         if found.idle_w or found.load_w:
