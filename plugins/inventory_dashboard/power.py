@@ -23,6 +23,10 @@ RAM = "RAM (GB)"
 RAM_SPEED = "Speed (MT/s)"
 SEQUENTIAL_READ = "Sequential read (MB/s)"
 LINK_SPEED = "Link speed (MB/s)"
+SATA_LINK = "SATA link (MB/s)"
+NVME_LINK = "NVMe link (MB/s)"
+DRIVE_TYPE = "Drive type"
+NVME_DRIVE_TYPES = ("M.2 NVMe", "Apple blade")
 ENCLOSURE_CATEGORY = "Drive enclosures"
 ENCLOSURE_PROFILE = "enclosure"
 SUPPLY_CATEGORY = "Power supplies"
@@ -30,6 +34,7 @@ DRIVE_CATEGORY = "Storage drives"
 MEMORY_CATEGORY = "Memory"
 COMPUTER_CATEGORY = "Computers"
 SPEED_RESOURCES = ("cpu", "ram_speed", "storage_speed", "gpu")
+RESOURCES = ("cpu", "ram_size", "ram_speed", "storage_tb", "storage_speed", "gpu", "vram")
 HARD_DRIVE = ("Storage medium", "HDD")
 TERABYTES = "TB"
 
@@ -44,43 +49,72 @@ class Asset:
     belongs_to: int | None
 
 
+def part_figures(asset, parameters):
+    """What one part brings, per resource; RAM speed only from memory and one-asset computers."""
+    figures = {"cpu": number(parameters, CPU_MARK), "gpu": number(parameters, G3D_MARK), "vram": number(parameters, VRAM),
+               "ram_size": (number(parameters, CAPACITY) if asset.category == MEMORY_CATEGORY else None) or number(parameters, RAM),
+               "ram_speed": number(parameters, RAM_SPEED) if asset.category in (MEMORY_CATEGORY, COMPUTER_CATEGORY) else None,
+               "storage_speed": number(parameters, SEQUENTIAL_READ),
+               "storage_tb": (number(parameters, CAPACITY) or 0.0) / 1000 if asset.category == DRIVE_CATEGORY else None}
+    return {resource: value for resource, value in figures.items() if value}
+
+
+def port_speed(drive_parameters, port_parameters):
+    """What a port part carries for this drive: an enclosure or dock carries any drive at its link speed, a
+    board or controller carries SATA and SAS drives on its SATA ports and NVMe drives on its NVMe slots."""
+    nvme = drive_parameters.get(DRIVE_TYPE) in NVME_DRIVE_TYPES
+    return number(port_parameters, LINK_SPEED) or number(port_parameters, NVME_LINK if nvme else SATA_LINK)
+
+
+def drive_cap(drive, assets, by_pk, parameters_of):
+    """The best port a drive can sit on: its host and what is installed beside it. None when no port speed is
+    known, so the drive counts at its own speed."""
+    candidates = [by_pk[drive.belongs_to]] if drive.belongs_to in by_pk else []
+    candidates += [asset for asset in assets if asset.belongs_to == drive.belongs_to and asset.pk != drive.pk]
+    speeds = [(port_speed(parameters_of(drive.part), parameters_of(port.part)), port) for port in candidates]
+    speeds = [(speed, port) for speed, port in speeds if speed]
+    if not speeds:
+        return None
+    speed, port = max(speeds, key=lambda pair: pair[0])
+    return {"speed": speed, "by": f"{port.serial} {port.part}"}
+
+
 @dataclass
 class Totals:
-    """Watts drawn at the wall: parts plus the conversion loss of the supplies that feed them."""
+    """Watts drawn at the wall: parts plus the conversion loss of the supplies that feed them, and each part's
+    figures, from which the machine's figures follow."""
     idle_w: float = 0.0
     load_w: float = 0.0
     loss_idle_w: float = 0.0
     loss_load_w: float = 0.0
-    cpu_mark: float = 0.0
-    terabytes: float = 0.0
-    ram_gb: float = 0.0
-    ram_speed: float | None = None
-    storage_speed: float = 0.0
-    gpu: float = 0.0
-    vram: float = 0.0
     parts: list = field(default_factory=list)
 
-    def resource(self, name):
+    def values(self, resource, uncapped=False):
+        key = "uncapped" if uncapped else "figures"
+        return [part[key].get(resource, part["figures"].get(resource)) for part in self.parts
+                if resource in part["figures"]]
+
+    def resource(self, name, uncapped=False):
         """A machine's figure per resource: sums for what adds up, the best part for speeds, the slowest
         module for RAM speed because the bus runs at it."""
-        return {"cpu": self.cpu_mark, "ram_size": self.ram_gb, "ram_speed": self.ram_speed or 0.0,
-                "storage_tb": self.terabytes, "storage_speed": self.storage_speed, "gpu": self.gpu, "vram": self.vram}[name]
+        found = self.values(name, uncapped)
+        if not found:
+            return 0.0
+        if name == "ram_speed":
+            return min(found)
+        return max(found) if name in ("storage_speed", "gpu", "vram") else sum(found)
 
-    def add_figures(self, asset, parameters, link_speed=None):
-        """`link_speed` is what the enclosure the part sits in can carry: a drive reads no faster than that."""
-        if asset.category == MEMORY_CATEGORY:
-            self.ram_gb += number(parameters, CAPACITY) or 0.0
-        self.ram_gb += number(parameters, RAM) or 0.0
-        speed = number(parameters, RAM_SPEED)
-        if speed and asset.category in (MEMORY_CATEGORY, COMPUTER_CATEGORY):
-            self.ram_speed = min(self.ram_speed or speed, speed)
-        read = number(parameters, SEQUENTIAL_READ) or 0.0
-        self.storage_speed = max(self.storage_speed, min(read, link_speed) if link_speed else read)
-        self.gpu = max(self.gpu, number(parameters, G3D_MARK) or 0.0)
-        self.vram = max(self.vram, number(parameters, VRAM) or 0.0)
-        self.cpu_mark += number(parameters, CPU_MARK) or 0.0
-        if asset.category == DRIVE_CATEGORY:
-            self.terabytes += (number(parameters, CAPACITY) or 0.0) / 1000
+    @property
+    def cpu_mark(self):
+        return self.resource("cpu")
+
+    @property
+    def terabytes(self):
+        return self.resource("storage_tb")
+
+    @property
+    def capped(self):
+        return self.resource("storage_speed") < self.resource("storage_speed", uncapped=True)
 
     @property
     def wall_idle_w(self):
@@ -96,6 +130,13 @@ class Totals:
 
 def average_power(idle_w, load_w, utilisation):
     return idle_w + utilisation * (load_w - idle_w)
+
+
+def scale_position(efficiency, reference):
+    """Where an efficiency sits against its fixed scale: below, within or above it."""
+    if efficiency < reference["low"]:
+        return "below"
+    return "above" if efficiency > reference["high"] else "within"
 
 
 def log_score(efficiency, reference):
@@ -173,19 +214,26 @@ def totals(assets, parameters_of):
     """Sums the parts' watts and figures; the supplies among them share the load by rated wattage."""
     result = Totals()
     supplies = []
-    links = {asset.pk: number(parameters_of(asset.part), LINK_SPEED) for asset in assets}
+    by_pk = {asset.pk: asset for asset in assets}
     for asset in assets:
         parameters = parameters_of(asset.part)
         if asset.category == SUPPLY_CATEGORY:
             supplies.append(parameters)
             continue
-        result.add_figures(asset, parameters, links.get(asset.belongs_to))
+        figures = part_figures(asset, parameters)
+        uncapped, cap = {}, None
+        if "storage_speed" in figures:
+            cap = drive_cap(asset, assets, by_pk, parameters_of)
+            if cap and cap["speed"] < figures["storage_speed"]:
+                uncapped["storage_speed"] = figures["storage_speed"]
+                figures["storage_speed"] = cap["speed"]
         idle, load = number(parameters, IDLE), number(parameters, LOAD)
-        if idle is None and load is None:
+        if idle is None and load is None and not figures:
             continue
         result.idle_w += idle or 0.0
-        result.load_w += load if load is not None else idle
-        result.parts.append({"serial": asset.serial, "pk": asset.pk, "part": asset.part, "idle_w": idle, "load_w": load})
+        result.load_w += (load if load is not None else idle) or 0.0
+        result.parts.append({"serial": asset.serial, "pk": asset.pk, "part": asset.part, "category": asset.category,
+                             "idle_w": idle, "load_w": load, "figures": figures, "uncapped": uncapped, "cap": cap})
     rated = sum(number(supply, WATTAGE) or 0.0 for supply in supplies)
     for supply in supplies:
         share = (number(supply, WATTAGE) or 0.0) / rated if rated else 1 / len(supplies)
@@ -198,18 +246,55 @@ def job_of(found):
     return "compute" if found.cpu_mark else "storage" if found.terabytes else None
 
 
+def efficiency_of(resource, figure, utilisation, average):
+    """A resource's efficiency: its figure per average watt, speeds at the utilisation, capacities in full."""
+    used = figure * utilisation if resource in SPEED_RESOURCES else figure
+    return used / average if average > 0 else 0.0
+
+
+def resource_row(resource, figure, reference, utilisation, average):
+    efficiency = efficiency_of(resource, figure, utilisation, average)
+    return {"figure": round(figure, 2), "efficiency": round(efficiency, 4),
+            "score": log_score(efficiency, reference) if figure else 1,
+            "scale": scale_position(efficiency, reference) if figure else "below"}
+
+
 def resource_scores(found, config, profile, utilisation, average):
-    """Each weighted resource scored on its own fixed log scale, as figure per average watt; speeds count at
-    the utilisation, capacities in full. A resource the machine lacks scores 1: it cannot do that part."""
+    """Each weighted resource scored on its own fixed log scale, as figure per average watt. A resource the
+    machine lacks scores 1: it cannot do that part. A capped storage speed also shows what it would score
+    uncapped."""
     rows = []
     for resource, weight in config["profiles"][profile].items():
         if not weight:
             continue
-        figure = found.resource(resource)
-        used = figure * utilisation if resource in SPEED_RESOURCES else figure
-        rows.append({"resource": resource, "weight": weight, "figure": round(figure, 2),
-                     "score": log_score(used / average, config["resources"][resource]) if figure else 1})
+        reference = config["resources"][resource]
+        row = {"resource": resource, "weight": weight, **resource_row(resource, found.resource(resource), reference, utilisation, average)}
+        uncapped = found.resource(resource, uncapped=True)
+        if uncapped > found.resource(resource):
+            uncapped_row = resource_row(resource, uncapped, reference, utilisation, average)
+            row.update({"uncapped_figure": uncapped_row["figure"], "uncapped_score": uncapped_row["score"]})
+        rows.append(row)
     return rows
+
+
+def scored(figures, config, utilisation, average):
+    if average <= 0:
+        return {}
+    rows = {resource: resource_row(resource, figure, config["resources"][resource], utilisation, average)
+            for resource, figure in figures.items()}
+    return {resource: {"score": row["score"], "scale": row["scale"]} for resource, row in rows.items()}
+
+
+def part_scores(parts, config, utilisation):
+    """Each part on its own: every figure it brings over its own average watts, on the same scales as the
+    machine. A part without watts of its own adds its figures to the machine but has no score."""
+    for part in parts:
+        idle, load = part["idle_w"], part["load_w"] if part["load_w"] is not None else part["idle_w"]
+        average = average_power(idle or 0.0, load or 0.0, utilisation) if idle is not None or load is not None else 0.0
+        part["average_w"] = round(average, 2)
+        part["scores"] = scored(part["figures"], config, utilisation, average)
+        part["uncapped_scores"] = scored(part["uncapped"], config, utilisation, average)
+    return parts
 
 
 def weighted_score(rows):
@@ -227,11 +312,13 @@ def summary(name, found, config, utilisation, measured=None, on_share=1.0, profi
     profile = profile or job
     resources = resource_scores(found, config, profile, utilisation, average) if profile and average > 0 else []
     score = weighted_score(resources)
-    return {"name": name, "job": job, "profile": profile, "resources": resources, "utilisation": utilisation, "idle_w": round(found.wall_idle_w, 1),
+    figures = {resource: round(found.resource(resource), 2) for resource in RESOURCES if found.resource(resource)}
+    return {"name": name, "job": job, "profile": profile, "resources": resources, "figures": figures,
+            "capped": found.capped, "utilisation": utilisation, "idle_w": round(found.wall_idle_w, 1),
             "average_w": round(average * on_share, 1), "on_share": on_share, "load_w": round(found.wall_load_w, 1),
             "loss_w": round(found.loss_idle_w + utilisation * (found.loss_load_w - found.loss_idle_w), 1),
             "cpu_mark": round(found.cpu_mark), "terabytes": round(found.terabytes, 1), "score": score,
-            "measured": measured, "parts": found.parts}
+            "measured": measured, "parts": part_scores(found.parts, config, utilisation)}
 
 
 class Inventory:

@@ -79,11 +79,35 @@ function score(value) {
     return value === null || value === undefined ? "-" : `<b>${value}</b>`;
 }
 
+const RESOURCES = {
+    cpu: ["CPU", "CPU Mark"], ram_size: ["RAM size", "GB"], ram_speed: ["RAM speed", "MT/s"],
+    storage_tb: ["Storage capacity", "TB"], storage_speed: ["Storage speed", "MB/s"], gpu: ["GPU", "G3D Mark"], vram: ["VRAM", "GB"],
+};
+const SPEED_RESOURCES = ["cpu", "ram_speed", "storage_speed", "gpu"];
+
+function amount(value) {
+    return Number(value).toLocaleString("de-DE", { maximumFractionDigits: 2 });
+}
+
+function resourceName(resource) {
+    return (RESOURCES[resource] ?? [resource])[0];
+}
+
+function figureText(resource, value) {
+    return `${amount(value)} ${(RESOURCES[resource] ?? [resource, ""])[1]}`;
+}
+
 function work(row) {
-    if (row.job === "compute") {
-        return `${row.cpu_mark.toLocaleString("de-DE")} CPU Mark`;
+    const figures = row.figures ?? {};
+    const found = Object.keys(RESOURCES).filter((resource) => figures[resource]);
+    return found.length ? found.map((resource) => `${resourceName(resource)} ${figureText(resource, figures[resource])}`).join(", ") : "-";
+}
+
+function scoreText(value, scale) {
+    if (value === null || value === undefined) {
+        return "-";
     }
-    return row.job === "storage" ? `${row.terabytes} TB` : "-";
+    return scale === "above" ? "100+" : scale === "below" && value === 1 ? "<1" : String(value);
 }
 
 function measured(row) {
@@ -92,45 +116,63 @@ function measured(row) {
 }
 
 function powerRows(rows) {
-    return rows.map((row) => [escape(row.name), watts(row.idle_w), watts(row.average_w), watts(row.load_w), work(row), score(row.score)]);
+    return rows.map((row) => [escape(row.name), watts(row.idle_w), watts(row.average_w), watts(row.load_w), escape(work(row)), score(row.score)]);
 }
 
 export function renderPower(target, data) {
     const context = data?.context ?? {};
-    const headers = ["", "Idle", "Average", "Load", "Work", "Score"];
+    const headers = ["", "Idle", "Average", "Load", "Resources", "Score"];
     const machines = table(["Machine", ...headers.slice(1)], powerRows(context.machines ?? []), [1, 2, 3, 4, 5]);
     const locations = table(["Location", ...headers.slice(1)], powerRows(context.locations ?? []), [1, 2, 3, 4, 5]);
     frame(target, `${machines}<br>${locations}<p style="opacity: 0.7; font-size: 0.8em">Average at the server utilisation; ` +
-        `score 1 to 100 on a log scale of work per average watt, with fixed references.</p>`);
+        `score 1 to 100, the weighted mean of each resource's score per average watt. The Efficiency menu shows how.</p>`);
 }
-
-const RESOURCES = {
-    cpu: ["CPU", "CPU Mark"], ram_size: ["RAM size", "GB"], ram_speed: ["RAM speed", "MT/s"],
-    storage_tb: ["Storage capacity", "TB"], storage_speed: ["Storage speed", "MB/s"], gpu: ["GPU", "G3D Mark"], vram: ["VRAM", "GB"],
-};
 
 function resourcesTable(resources) {
     if (!resources?.length) {
         return "";
     }
-    return table(["Resource", "Figure", "Weight", "Score"], resources.map((row) => {
-        const [name, unit] = RESOURCES[row.resource] ?? [row.resource, ""];
-        const figure = row.figure ? `${Number(row.figure).toLocaleString("de-DE")} ${unit}` : "none";
-        return [escape(name), escape(figure), `${Math.round(row.weight * 100)}%`, score(row.score)];
-    }), [1, 2, 3]);
+    return table(["Resource", "Figure", "Per average watt", "Weight", "Score", "Without the cap"], resources.map((row) => {
+        const figure = row.figure ? figureText(row.resource, row.figure) : "none";
+        const capped = row.uncapped_figure ? `, could do ${figureText(row.resource, row.uncapped_figure)}` : "";
+        return [escape(resourceName(row.resource)), escape(figure + capped), row.figure ? amount(row.efficiency) : "-",
+            `${Math.round(row.weight * 100)}%`, `<b>${scoreText(row.score, row.scale)}</b>`,
+            row.uncapped_score ? String(row.uncapped_score) : ""];
+    }), [2, 3, 4, 5]);
+}
+
+function partCap(part) {
+    if (!part.cap) {
+        return part.figures?.storage_speed ? "port speed unknown" : "";
+    }
+    const limited = part.uncapped?.storage_speed;
+    return limited ? `reads ${amount(limited)} MB/s, counts ${amount(part.cap.speed)} (${escape(part.cap.by)})`
+        : `port ${amount(part.cap.speed)} MB/s, not limiting (${escape(part.cap.by)})`;
+}
+
+function partsTable(parts) {
+    const rows = (parts ?? []).map((part) => {
+        const resources = Object.keys(RESOURCES).filter((resource) => part.figures?.[resource]);
+        const brings = resources.map((resource) => `${resourceName(resource)} ${figureText(resource, part.figures[resource])}`).join(", ");
+        const scores = resources.map((resource) => {
+            const own = part.scores?.[resource];
+            const uncapped = part.uncapped_scores?.[resource];
+            return own ? `${resourceName(resource)} ${scoreText(own.score, own.scale)}${uncapped ? ` (${scoreText(uncapped.score, uncapped.scale)} uncapped)` : ""}` : "";
+        }).filter(Boolean).join(", ");
+        return [`<a href="/web/stock/item/${part.pk}" style="color: inherit">${escape(part.serial)}</a>`, escape(part.part),
+            watts(part.average_w), escape(brings || "-"), escape(scores || (resources.length ? "no watts of its own" : "-")), partCap(part)];
+    });
+    return table(["Asset", "Part", "Average", "Brings", "Its own scores", "Drive port"], rows, [2]);
 }
 
 export function renderPowerPanel(target, data) {
     const row = data?.context ?? {};
     const stats = stat("idle", watts(row.idle_w)) + stat(`average at ${Math.round((row.utilisation ?? 0) * 100)}%`, watts(row.average_w)) +
-        stat("load", watts(row.load_w)) + stat("supply loss", watts(row.loss_w)) + stat("work", work(row)) +
+        stat("load", watts(row.load_w)) + stat("supply loss", watts(row.loss_w)) +
         stat("score", row.score ?? "-") + (row.measured ? stat("measured idle / load", measured(row)) : "");
-    const parts = (row.parts ?? []).map((part) => [`<a href="/web/stock/item/${part.pk}" style="color: inherit">${escape(part.serial)}</a>`,
-        escape(part.part), watts(part.idle_w), watts(part.load_w)]);
     const profile = row.profile ? `<p style="opacity: 0.7; font-size: 0.8em">Scored as ${escape(row.profile)}: the weighted mean ` +
-        `of each resource's score per average watt.</p>` : "";
-    frame(target, stats + profile + resourcesTable(row.resources) + "<br>" +
-        (parts.length ? table(["Asset", "Part", "Idle", "Load"], parts, [2, 3]) : ""));
+        `of each resource's score per average watt. Brings: ${escape(work(row))}.</p>` : "";
+    frame(target, stats + profile + resourcesTable(row.resources) + "<br>" + partsTable(row.parts));
 }
 
 export function renderPartPower(target, data) {
@@ -207,10 +249,30 @@ export function renderValueMenu(target, data) {
     enableSorting(target);
 }
 
-function partsTable(parts) {
-    return table(["Asset", "Part", "Idle", "Load"], parts.map((part) =>
-        [`<a href="/web/stock/item/${part.pk}" style="color: inherit">${escape(part.serial)}</a>`, escape(part.part),
-            watts(part.idle_w), watts(part.load_w)]), [2, 3]);
+function explanation(scale) {
+    if (!scale) {
+        return "";
+    }
+    const share = Math.round((scale.utilisation ?? 0) * 100);
+    const measure = (resource) => `${(RESOURCES[resource] ?? [resource, ""])[1]}${SPEED_RESOURCES.includes(resource) ? ` x ${share}%` : ""} per W`;
+    const references = table(["Resource", "Efficiency is", "Score 1 at", "Score 100 at"],
+        Object.entries(scale.resources ?? {}).map(([resource, reference]) =>
+            [escape(resourceName(resource)), escape(measure(resource)), amount(reference.low), amount(reference.high)]), [2, 3]);
+    const profiles = Object.keys(scale.profiles ?? {});
+    const weights = table(["Resource", ...profiles], Object.keys(RESOURCES).map((resource) =>
+        [escape(resourceName(resource)), ...profiles.map((profile) => `${Math.round((scale.profiles[profile][resource] ?? 0) * 100)}%`)]),
+        profiles.map((_, index) => index + 1));
+    return heading("How the score is calculated") +
+        `<p style="font-size: 0.85em">Each resource of a machine has an <b>efficiency</b>: its figure per average watt, where the ` +
+        `average is idle plus ${share}% of the way to load. Speeds (CPU, RAM speed, storage speed, GPU) count at that ${share}% use, ` +
+        `capacities (RAM, storage, VRAM) in full. Its <b>score</b> is 1 + 99 x log(efficiency / low) / log(high / low): every ` +
+        `doubling of efficiency adds the same number of points. Low and high are fixed points, not the best thing you own, so a ` +
+        `score never moves because something new was bought. Scores are kept between 1 and 100: <b>100+</b> means the efficiency is ` +
+        `above the high point, <b>&lt;1</b> below the low one, so a score cannot exceed 100. A resource a machine lacks scores 1.</p>` +
+        `<p style="font-size: 0.85em">A <b>machine's score</b> is the mean of its resources' scores, weighted by its profile; a ` +
+        `<b>location's</b> is the mean of its machines' scores, weighted by their average watts. A part's own scores use its own ` +
+        `watts. A drive counts at most at the speed of the port it sits on (an enclosure's or dock's link, a board's or ` +
+        `controller's SATA or NVMe ports).</p>` + references + "<br>" + weights;
 }
 
 export function renderEfficiencyMenu(target, data) {
@@ -220,8 +282,8 @@ export function renderEfficiencyMenu(target, data) {
         return;
     }
     const powerRow = (row, first) => [first, cell(watts(row.idle_w), row.idle_w), cell(watts(row.average_w), row.average_w),
-        cell(watts(row.load_w), row.load_w), cell(work(row), row.cpu_mark || row.terabytes), cell(score(row.score), row.score ?? -1)];
-    const headers = ["Idle", "Average", "Load", "Work", "Score"];
+        cell(watts(row.load_w), row.load_w), cell(escape(work(row)), row.cpu_mark || row.terabytes), cell(score(row.score), row.score ?? -1)];
+    const headers = ["Idle", "Average", "Load", "Resources", "Score"];
     const machines = sortableTable(["Machine", "Profile", ...headers], (context.machines ?? []).map((row) => {
         const [first, ...rest] = powerRow(row, cell(`<a href="${row.url}" style="color: inherit">${escape(row.name)}</a>`, row.name));
         return [first, cell(escape(row.profile ?? "-"), row.profile ?? ""), ...rest];
@@ -229,12 +291,10 @@ export function renderEfficiencyMenu(target, data) {
     const locations = sortableTable(["Location", ...headers], (context.locations ?? []).map((row) =>
         powerRow(row, cell(escape(row.name), row.name))), [1, 2, 3, 4, 5]);
     const parts = (context.machines ?? []).map((row) =>
-        `<details><summary>${escape(row.name)}${row.score ? `, score ${row.score}` : ""}</summary>` +
-        `${resourcesTable(row.resources)}<br>${partsTable(row.parts ?? [])}</details>`).join("");
-    frame(target, heading("Machines") + machines + heading("Locations") + locations + heading("Each machine: its resources and parts") + parts +
-        `<p style="opacity: 0.7; font-size: 0.8em">Average at the server utilisation. Each resource is scored 1 to 100 on a log scale ` +
-        `of its figure per average watt (speeds at the utilisation, capacities in full), with fixed references; a machine's score is ` +
-        `their mean weighted by its profile, a location's the mean of its machines weighted by their watts.</p>`);
+        `<details><summary>${escape(row.name)}${row.score ? `, score ${row.score}` : ""}${row.capped ? ", storage capped by its ports" : ""}` +
+        `</summary>${resourcesTable(row.resources)}<br>${partsTable(row.parts)}</details>`).join("");
+    frame(target, heading("Machines") + machines + heading("Locations") + locations + heading("Each machine: its resources and parts") +
+        parts + explanation(context.scale));
     enableSorting(target);
 }
 
