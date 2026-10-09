@@ -78,8 +78,10 @@ def power_inventory():
         parameters.setdefault(part_names[row["model_id"]], {})[row["template__name"]] = row["data"]
     locations = {row["pk"]: {"name": row["name"], "parent": row["parent_id"], "pathstring": row["pathstring"]}
                  for row in StockLocation.objects.values("pk", "name", "parent_id", "pathstring")}
+    roles = {row["pk"]: row["tags__name"][len(power.ROLE_TAG):]
+             for row in assets().filter(tags__name__startswith=power.ROLE_TAG).values("pk", "tags__name")}
     inventory_assets = [power.Asset(row["serial"], row["pk"], row["part__name"], row["part__category__name"] or "",
-                                    row["location_id"], row["belongs_to_id"]) for row in rows]
+                                    row["location_id"], row["belongs_to_id"], roles.get(row["pk"])) for row in rows]
     return power.Inventory(inventory_assets, locations, parameters)
 
 
