@@ -65,8 +65,7 @@ and how many stickers of each size there are (and how many are stuck on). `catal
 activates it; add the widgets from the dashboard menu.
 
 The same plugin adds five entries to the top menu, Value, Efficiency, Attention, Machines and
-Stickers, each a tab on the outermost location and on every location below it, scoped to that
-location: value by category, location and machine with every asset; watts and efficiency score of
+Stickers, each a tab on the Stock page above every location, and on every location, scoped to it: value by category, location and machine with every asset; watts and efficiency score of
 every machine and location; every untested, faulty or broken asset with its notes; every machine
 with its installed parts; and a checklist of every sticker to tick off once it is stuck on. A tick
 is saved in the item's metadata (`sticker`, the date), not in the catalog.

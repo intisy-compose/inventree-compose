@@ -41,6 +41,23 @@ def installed_ids(host):
     return tuple(sorted(part.serial for part in host.installed_parts.all() if part.serial))
 
 
+def as_stock_items(selected):
+    """Labels are for assets, but the print dialog also runs on parts and locations: a part stands for every
+    asset of that model, a location for everything placed in it or below."""
+    from part.models import Part
+    from stock.models import StockItem, StockLocation
+
+    result = []
+    for each in selected:
+        if isinstance(each, Part):
+            result += StockItem.objects.filter(part=each).exclude(serial__isnull=True).exclude(serial="")
+        elif isinstance(each, StockLocation):
+            result += StockItem.objects.filter(location__in=each.get_descendants(include_self=True), belongs_to__isnull=True)
+        else:
+            result.append(each)
+    return list({item.pk: item for item in result}.values())
+
+
 def with_installed(items):
     """The selected items and everything installed in them, all the way down, each once."""
     seen, result = set(), []
@@ -95,6 +112,7 @@ class AssetLabelsPlugin(LabelPrintingMixin, InvenTreePlugin):
 
     def print_labels(self, label, output, items, request, **kwargs):
         options = kwargs.get("printing_options") or {}
+        items = as_stock_items(items)
         if options.get("installed"):
             items = with_installed(items)
         labels = self.labels_for(items, request, options.get("size", SIZE_FROM_TAG))

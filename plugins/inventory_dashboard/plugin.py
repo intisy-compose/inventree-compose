@@ -146,13 +146,9 @@ class InventoryDashboardPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugi
                 "source": self.plugin_static_file(f"dashboard.js:{function}"), "context": data}
 
     def get_ui_navigation_items(self, request, context, **kwargs):
-        """The menus open as tabs on the outermost location, since a plugin cannot add a page of its own to the app."""
-        from stock.models import StockLocation
-
-        root = StockLocation.objects.filter(parent__isnull=True).order_by("pk").first()
-        if root is None:
-            return []
-        return [{"key": f"menu-{key}", "title": title, "icon": icon, "options": {"url": f"/stock/location/{root.pk}/{key}"}}
+        """The menus open as tabs on the Stock page above every location, since a plugin cannot add a page of
+        its own to the app."""
+        return [{"key": f"menu-{key}", "title": title, "icon": icon, "options": {"url": f"/stock/location/index/{key}"}}
                 for key, title, icon, _ in MENUS]
 
     def menu_panels(self, inventory, config, pk):
@@ -165,6 +161,8 @@ class InventoryDashboardPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugi
     def get_ui_panels(self, request, context, **kwargs):
         config = self.power_config()
         target, pk = context.get("target_model"), context.get("target_id")
+        if target == "stocklocation" and pk is None:
+            return self.menu_panels(power_inventory(), config, None)
         if pk is None:
             return []
         inventory = power_inventory()

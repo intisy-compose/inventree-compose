@@ -38,15 +38,15 @@ def link_of(item):
 
 class Scope:
     """A location with everything placed in it or below, and everything installed in those, with the stock
-    items loaded once."""
+    items loaded once. No location means every location: the Stock page above them all."""
 
     def __init__(self, inventory, location_pk):
         from stock.models import StockItem
 
         self.inventory = inventory
         self.location_pk = location_pk
-        self.location_pks = inventory.locations_below(location_pk)
-        self.assets = inventory.location_and_below(location_pk)
+        self.location_pks = set(inventory.locations) if location_pk is None else inventory.locations_below(location_pk)
+        self.assets = list(inventory.assets) if location_pk is None else inventory.location_and_below(location_pk)
         self.pks = {asset.pk for asset in self.assets}
         self.items = {item.pk: item for item in StockItem.objects.filter(pk__in=self.pks)
                       .select_related("part", "part__category", "location", "belongs_to").prefetch_related("tags")}
@@ -164,6 +164,12 @@ def sticker_menu(scope):
         return lambda depth: group(scope.inventory.locations[pk]["name"], [item for item in placed if not scope.installed(item)],
                                    subgroups, depth)
 
-    rows = location(scope.location_pk)(0)
+    if scope.location_pk is not None:
+        rows = location(scope.location_pk)(0)
+    else:
+        roots = [pk for pk in scope.location_pks if scope.inventory.locations[pk]["parent"] is None]
+        rows = [row for pk in sorted(roots, key=lambda pk: scope.inventory.locations[pk]["name"]) for row in location(pk)(0)]
+        rows += group("No location", [item for item in scope.placed_at(None) if not scope.installed(item)],
+                      [(f"{item.serial} {item.part.name}", machine(item)) for item in scope.placed_at(None) if scope.installed(item)], 0)
     stickers = [row for row in rows if row["kind"] == "sticker"]
     return {"rows": rows, "total": len(stickers), "stuck": sum(bool(row["stuck"]) for row in stickers)}
