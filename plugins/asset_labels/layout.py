@@ -19,6 +19,7 @@ OUTLINE_MARGIN_MM = 0.8
 OUTLINE_STEP_MM = 0.8
 OUTLINE_CLEARANCE_MM = 1.2
 MIN_BRIDGE_MM = 2.0
+MIN_ROW_END_MM = 10.0
 MAX_RELAYOUTS = 60
 ROW_BREAK = "row"
 AREA_BREAK = "area"
@@ -219,32 +220,110 @@ class Flow:
             height = max(height, reach)
         return height
 
-    def fill_area(self, area, sequence, start, forced):
-        """Rows from `start` until the area is full; the rows and where the next area takes over."""
-        rows, bottom = [], 0.0
+    def fitting_row(self, area, sequence, index, forced, rows, bottom):
+        """The row from `index` that still fits below `bottom`, with the gap above it; (None, 0) when none does."""
+        cap = area.height
+        for _ in range(8):
+            row = self.build_row(area, sequence, index, forced, cap)
+            if row is None:
+                return None, 0.0
+            gap = self.row_gap(rows[-1], row) if rows else self.margin(row)
+            overflow = bottom + gap + row.height + self.margin(row) - area.height
+            if overflow <= TOLERANCE:
+                return row, gap
+            cap = row.height - overflow
+            if cap <= 0:
+                return None, 0.0
+        return None, 0.0
+
+    def fill_area(self, area, sequence, start, forced, rows=None):
+        """Rows from `start` below the area's `rows` until it is full; all its rows and where the flow goes on.
+        Where the next item leaves a row's end or the area's end empty, a later group that fits there whole
+        moves forward."""
+        rows = list(rows or [])
+        bottom = rows[-1].top + rows[-1].height if rows else 0.0
         index = start
         while index < len(sequence):
-            cap = area.height
-            row = None
-            for _ in range(8):
-                row = self.build_row(area, sequence, index, forced, cap)
-                if row is None:
-                    break
-                gap = self.row_gap(rows[-1], row) if rows else self.margin(row)
-                overflow = bottom + gap + row.height + self.margin(row) - area.height
-                if overflow <= TOLERANCE:
-                    break
-                cap = row.height - overflow
-                row = None
-                if cap <= 0:
-                    break
+            row, gap = self.fitting_row(area, sequence, index, forced, rows, bottom)
+            if row is None and self.pull_forward(area, sequence, index, forced, rows, bottom):
+                continue
             if row is None or (rows and forced.get(id(sequence[index])) == AREA_BREAK):
                 break
+            row = self.fill_row_end(area, sequence, index, forced, row)
             row.top = bottom + gap
             bottom = row.top + row.height
             rows.append(row)
             index = row.end
-        return rows, index
+        return rows, self.without_trailing_tag(area, rows, sequence, index)
+
+    def without_trailing_tag(self, area, rows, sequence, index):
+        """A group's name tag that would end an area with all its group going on elsewhere moves along with it:
+        the last row gives the tag back, and where the flow goes on moves back to the tag."""
+        if not rows or index >= len(sequence) or index < 1:
+            return index
+        last = rows[-1]
+        column = last.columns[-1]
+        opener = sequence[index - 1]
+        if len(column.placed) != 1 or not opener.opens or opener.opens not in sequence[index].chain:
+            return index
+        if len(rows) == 1 and len(last.columns) == 1:
+            return index
+        last.columns.pop()
+        if last.columns:
+            last.end = index - 1
+            last.height = max(top + area.reach(entry) for kept in last.columns for _, top, entry in kept.placed)
+        else:
+            rows.pop()
+        return index - 1
+
+    def movable_runs(self, sequence, at):
+        """Whole groups after `at` that may move to `at`: siblings of the group being laid out there or of one of
+        its parents, so every group still lies inside its parent's run."""
+        if at >= len(sequence):
+            return []
+        anchor = sequence[at].chain[:-1] if sequence[at].opens else sequence[at].chain
+        runs = []
+        for start in range(at + 1, len(sequence)):
+            item = sequence[start]
+            parent = item.chain[:-1]
+            if not item.opens or anchor[:len(parent)] != parent:
+                continue
+            end = start + 1
+            while end < len(sequence) and item.opens in sequence[end].chain:
+                end += 1
+            runs.append((start, end))
+        return runs
+
+    @staticmethod
+    def moved(sequence, run, at):
+        start, end = run
+        return sequence[:at] + sequence[start:end] + sequence[at:start] + sequence[end:]
+
+    def pull_forward(self, area, sequence, index, forced, rows, bottom):
+        """When nothing from `index` fits below the last row, the first later group that does fit whole takes the
+        space; True when one moved."""
+        for run in self.movable_runs(sequence, index):
+            candidate = self.moved(sequence, run, index)
+            row, _ = self.fitting_row(area, candidate, index, forced, rows, bottom)
+            if row is not None and row.end >= index + run[1] - run[0]:
+                sequence[:] = candidate
+                return True
+        return False
+
+    def fill_row_end(self, area, sequence, index, forced, row):
+        """While a row ends with room to spare, the first later group that fits whole into it, without making the
+        row taller, moves into that room."""
+        while row.end < len(sequence) and area.width - row.columns[-1].right > MIN_ROW_END_MM:
+            for run in self.movable_runs(sequence, row.end):
+                candidate = self.moved(sequence, run, row.end)
+                wider = self.build_row(area, candidate, index, forced, row.height)
+                if wider is not None and wider.end >= row.end + run[1] - run[0] and wider.height <= row.height + TOLERANCE:
+                    sequence[:] = candidate
+                    row = wider
+                    break
+            else:
+                return row
+        return row
 
     def open_group(self, sequence, index):
         """The innermost group that started before `index` and goes on after it."""
@@ -256,34 +335,49 @@ class Flow:
         return chain
 
     def lay_out(self, make_areas, forced):
+        """Pages of areas. The flow fills an area until its next item does not fit, then goes on in the first
+        area of the page that can take it, earlier ones included: an area the next item does not fit keeps its
+        room for smaller items later. A group that goes on in another area opens there with a continuation tag."""
         sequence = list(self.sequence)
         pages, index = [], 0
         while index < len(sequence):
             page = PageLayout(make_areas())
-            for area in page.areas:
-                if index >= len(sequence):
+            current = None
+            while index < len(sequence):
+                placed = self.place_chunk(page, sequence, index, forced, current)
+                if placed is None:
                     break
-                chain = self.open_group(sequence, index) if index > 0 else ()
-                if chain:
-                    sequence.insert(index, FlowItem(self.continuation(chain, area.width - 2 * growth(len(chain))), chain))
-                exempt = id(sequence[index + 1]) if chain and index + 1 < len(sequence) else None
-                breaks = {key: kind for key, kind in forced.items() if key != exempt}
-                rows, next_index = self.fill_area(area, sequence, index, breaks)
-                if chain and next_index <= index + 1:
-                    del sequence[index]
-                    continue
-                page.add(area, rows)
-                index = next_index
+                current, index = placed
             if not page.filled:
                 entry = sequence[index].entry
                 raise ValueError(f"{getattr(entry, 'asset_id', '') or entry.name} does not fit on an empty page")
             pages.append(page)
         return pages
 
+    def place_chunk(self, page, sequence, index, forced, current):
+        """Fills the area the flow is in, or else the first area of the page that takes the next item; the area
+        and where the flow goes on, or None when no area of the page takes anything."""
+        candidates = ([current] if current is not None else []) + [area for area in page.areas if area is not current]
+        for area in candidates:
+            chain = self.open_group(sequence, index) if index > 0 and area is not current else ()
+            if chain:
+                sequence.insert(index, FlowItem(self.continuation(chain, area.width - 2 * growth(len(chain))), chain))
+            exempt = id(sequence[index + 1]) if chain and index + 1 < len(sequence) else None
+            breaks = {key: kind for key, kind in forced.items() if key != exempt}
+            before = page.rows_of(area)
+            rows, next_index = self.fill_area(area, sequence, index, breaks, before)
+            if next_index <= index + (1 if chain else 0):
+                if chain:
+                    del sequence[index]
+                continue
+            page.set_rows(area, rows)
+            return area, next_index
+        return None
+
     def badly_started_openers(self, pages):
         """The tags of groups that fall apart in an area: their rows on consecutive lines do not touch, or their
-        first row holds nothing but the tag. Each then starts on a new row, or in the next area when it already
-        starts its row."""
+        tag ends a row behind other groups with the group going on below. Each then starts on a new row, or in
+        another area when that is not enough."""
         openers = []
         for page in pages:
             for _, rows in page.filled:
@@ -291,7 +385,9 @@ class Flow:
                     opener = next((item for item in self.items_in(rows, key) if item.opens == key), None)
                     if opener is None:
                         continue
-                    alone = self.entries_in_row(rows[spans[0][0]], key) == 1 < self.group_size(key)
+                    first_row = rows[spans[0][0]]
+                    alone = (self.entries_in_row(first_row, key) == 1 < self.group_size(key)
+                             and key not in first_row.columns[0].chain)
                     apart = any(row_b == row_a + 1 and min(right_a, right_b) - max(left_a, left_b) < MIN_BRIDGE_MM
                                 for (row_a, left_a, right_a), (row_b, left_b, right_b) in zip(spans, spans[1:]))
                     if alone or apart:
@@ -341,11 +437,17 @@ class Flow:
 class PageLayout:
     def __init__(self, areas):
         self.areas = areas
-        self.filled = []
+        self.rows = {}
 
-    def add(self, area, rows):
-        if rows:
-            self.filled.append((area, rows))
+    def rows_of(self, area):
+        return self.rows.get(id(area), [])
+
+    def set_rows(self, area, rows):
+        self.rows[id(area)] = rows
+
+    @property
+    def filled(self):
+        return [(area, self.rows[id(area)]) for area in self.areas if self.rows.get(id(area))]
 
 
 def next_break(kind):
