@@ -118,6 +118,7 @@ function Show-Urls {
     $config = Read-Config
     Write-Host ""
     Write-Host "  InvenTree : https://$($config['INVENTREE_HOST'])   (from any device on your tailnet)"
+    Write-Host "  Locally   : http://localhost:8441   (this PC only)"
     Write-Host "  Sign in   : $($config['INVENTREE_ADMIN_USER']) / the INVENTREE_ADMIN_PASSWORD in config.env"
 }
 

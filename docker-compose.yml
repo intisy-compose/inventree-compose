@@ -1,6 +1,6 @@
-# InvenTree inventory management, reachable over Tailscale. Every image is pinned; start it through
-# docker-compose.ps1, which passes --env-file config.env and fills in the tailnet URL once the node
-# has joined.
+# InvenTree inventory management, reachable over Tailscale and on this PC's 127.0.0.1:8441. Every
+# image is pinned; start it through docker-compose.ps1, which passes --env-file config.env and fills
+# in the tailnet URL once the node has joined.
 name: inventree
 
 x-inventree: &inventree
@@ -8,6 +8,9 @@ x-inventree: &inventree
   restart: unless-stopped
   environment:
     INVENTREE_SITE_URL: https://${INVENTREE_HOST:-inventree.invalid}
+    # The site URL is added to both lists; these are the local address on this PC.
+    INVENTREE_ALLOWED_HOSTS: localhost,127.0.0.1
+    INVENTREE_TRUSTED_ORIGINS: http://localhost:8441,http://127.0.0.1:8441
     INVENTREE_DB_ENGINE: postgresql
     INVENTREE_DB_NAME: inventree
     INVENTREE_DB_HOST: db
@@ -32,13 +35,30 @@ x-inventree: &inventree
     - ./plugins:/home/inventree/plugins:ro
 
 services:
-  # Owns the network namespace the gateway shares, and forwards tailnet :443 to Caddy. The node key
-  # lives in data/tailscale; TS_AUTHKEY is only needed for the first join.
+  # Owns the network namespace and publishes the local port, on loopback only, so the local address
+  # keeps working while tailscale restarts or cannot join. It answers 502 until the server is up,
+  # and starts without it so `up` can join the tailnet before the server needs the ts.net name.
+  gateway:
+    image: caddy:2.11.4-alpine
+    container_name: inventree-gateway
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8441:8441"
+    environment:
+      INVENTREE_HOST: ${INVENTREE_HOST:-inventree.invalid}
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+      - tailscale-socket:/var/run/tailscale
+      - inventree-files:/srv/inventree:ro
+      - inventree-caddy-data:/data
+
+  # Joins the gateway's namespace and forwards tailnet :443 to Caddy. The node key lives in
+  # data/tailscale; TS_AUTHKEY is only needed for the first join.
   tailscale:
     image: tailscale/tailscale:v1.102.4
     container_name: inventree-tailscale
-    hostname: ${TS_HOSTNAME:-inventree}
     restart: unless-stopped
+    network_mode: "service:gateway"
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY:-}
       TS_HOSTNAME: ${TS_HOSTNAME:-inventree}
@@ -50,24 +70,10 @@ services:
       - ./data/tailscale:/var/lib/tailscale
       - ./gateway/serve.json:/config/serve.json:ro
       - tailscale-socket:/var/run/tailscale
-
-  gateway:
-    image: caddy:2.11.4-alpine
-    container_name: inventree-gateway
-    restart: unless-stopped
-    network_mode: "service:tailscale"
-    environment:
-      INVENTREE_HOST: ${INVENTREE_HOST:-inventree.invalid}
-    volumes:
-      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
-      - tailscale-socket:/var/run/tailscale
-      - inventree-files:/srv/inventree:ro
-      - inventree-caddy-data:/data
     depends_on:
-      tailscale:
+      gateway:
         condition: service_started
-      server:
-        condition: service_healthy
+        restart: true
 
   server:
     <<: *inventree
