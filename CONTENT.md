@@ -1,13 +1,14 @@
 [InvenTree](https://github.com/inventree/InvenTree) in Docker, served over
-[Tailscale](https://tailscale.com/) with real HTTPS to every device on your tailnet, plus a catalog
-tool that keeps the inventory declared in TOML files and prints QR labels on A4 sticker sheets.
+[Tailscale](https://tailscale.com/) with real HTTPS to every device on your tailnet and at
+`http://localhost:8441` on the machine that runs it, plus a catalog tool that keeps the inventory
+declared in TOML files and prints QR labels on A4 sticker sheets.
 
 ## Stack
 
 | service | image | role |
 | --- | --- | --- |
-| `tailscale` | `tailscale/tailscale:v1.102.4` | joins your tailnet as `inventree` and forwards `:443` |
-| `gateway` | `caddy:2.11.4-alpine` | HTTPS for the `ts.net` name with certificates from Tailscale; serves static and media files |
+| `gateway` | `caddy:2.11.4-alpine` | HTTPS for the `ts.net` name with certificates from Tailscale, and `127.0.0.1:8441`; serves static and media files |
+| `tailscale` | `tailscale/tailscale:v1.102.4` | joins your tailnet as `inventree` inside the gateway's network and forwards `:443` |
 | `server` | `inventree/inventree:1.5.6` | the app and its REST API, at `https://inventree.<tailnet>.ts.net` |
 | `worker` | `inventree/inventree:1.5.6` | InvenTree's background tasks |
 | `db` | `postgres:17.10-alpine` | the database |
@@ -31,7 +32,7 @@ cd inventree-compose
 ```
 
 `up` joins the tailnet first, reads the node's real `ts.net` name and writes `INVENTREE_HOST` into
-`config.env` before starting the rest, then prints the URL. Sign in with `INVENTREE_ADMIN_USER` and
+`config.env` before starting the rest, then prints both URLs. Sign in with `INVENTREE_ADMIN_USER` and
 the generated `INVENTREE_ADMIN_PASSWORD`. The auth key is only used for the first join; the node
 identity stays in `data/tailscale` afterwards.
 

@@ -1,11 +1,11 @@
-# Runs inside the tailscale container's network namespace. Certificates for the ts.net name come
-# from tailscaled over its socket, so every device on the tailnet gets real, auto-renewed HTTPS.
+# tailscale shares this container's network namespace. Certificates for the ts.net name come from
+# tailscaled over its socket, never from a public CA, so every device on the tailnet gets real HTTPS.
 {
 	admin off
 	auto_https disable_redirects
 }
 
-{$INVENTREE_HOST}:443 {
+(inventree) {
 	encode gzip
 	request_body {
 		max_size 100MB
@@ -25,4 +25,16 @@
 	handle {
 		reverse_proxy server:8000
 	}
+}
+
+{$INVENTREE_HOST}:443 {
+	tls {
+		get_certificate tailscale
+	}
+	import inventree
+}
+
+# This PC only: the port is published on 127.0.0.1, and tailnet traffic reaches nothing but :443.
+http://:8441 {
+	import inventree
 }
