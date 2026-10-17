@@ -14,6 +14,10 @@ class ApiError(Exception):
     pass
 
 
+class UnreachableError(ApiError):
+    pass
+
+
 class Client:
     def __init__(self, base_url, user, password):
         self.base_url = base_url.rstrip("/")
@@ -66,5 +70,5 @@ class Client:
             detail = error.read().decode("utf-8", "replace")[:1000]
             raise ApiError(f"{request.get_method()} {request.full_url}: HTTP {error.code} {detail}")
         except urllib.error.URLError as error:
-            raise ApiError(f"{request.full_url}: {error.reason}")
+            raise UnreachableError(f"{request.full_url}: {error.reason}")
         return json.loads(payload) if payload else None
