@@ -429,14 +429,87 @@ function saveSticker(data, pk, stuck) {
     return apiRequest(data, "PATCH", `/api/metadata/stockitem/${pk}/`, { metadata: { sticker: stuck } });
 }
 
-/** @implNote Printing runs in InvenTree's background worker: the request returns a job, which is polled until it holds the PDF. */
-async function printLabels(data, pks) {
-    const templates = await apiRequest(data, "GET", "/api/label/template/?model_type=stockitem");
-    const template = (templates.results ?? templates).find((entry) => entry.name === LABEL_TEMPLATE);
-    if (!template) {
-        throw new Error(`no label template named ${LABEL_TEMPLATE}`);
+const PRINT_ENDPOINT = "/api/label/print/";
+const FIELDS_OF_EVERY_PRINTER = ["template", "plugin", "items"];
+
+function listOf(response) {
+    return response?.results ?? response ?? [];
+}
+
+/** @implNote InvenTree's own print dialog builds its form the same way: the endpoint's OPTIONS, asked per printer, list that printer's fields. */
+async function printerFields(data, printer) {
+    const options = await apiRequest(data, "OPTIONS", `${PRINT_ENDPOINT}?plugin=${encodeURIComponent(printer)}`);
+    return Object.entries(options?.actions?.POST ?? {})
+        .filter(([name, field]) => !FIELDS_OF_EVERY_PRINTER.includes(name) && !field.read_only);
+}
+
+async function relatedChoices(data, field) {
+    const query = new URLSearchParams(field.filters ?? {}).toString();
+    const rows = listOf(await apiRequest(data, "GET", `${field.api_url}${query ? `?${query}` : ""}`));
+    return rows.map((row) => ({ value: row.pk, display_name: row.name ?? String(row.pk) }));
+}
+
+function choiceSelect(name, choices, chosen) {
+    const options = choices.map((choice) =>
+        `<option value="${escape(choice.value)}"${String(choice.value) === String(chosen) ? " selected" : ""}>${escape(choice.display_name)}</option>`);
+    return `<select data-option="${escape(name)}">${options.join("")}</select>`;
+}
+
+async function fieldInput(data, name, field) {
+    if (field.type === "boolean") {
+        return `<input type="checkbox" data-option="${escape(name)}"${field.default ? " checked" : ""}>`;
     }
-    let job = await apiRequest(data, "POST", "/api/label/print/", { template: template.pk, plugin: LABEL_PRINTER, items: pks });
+    if (field.type === "choice") {
+        return choiceSelect(name, field.choices ?? [], field.default);
+    }
+    if (field.type === "related field") {
+        return choiceSelect(name, await relatedChoices(data, field), field.default);
+    }
+    const kind = ["integer", "float", "decimal"].includes(field.type) ? "number" : "text";
+    return `<input type="${kind}" data-option="${escape(name)}" value="${escape(field.default ?? "")}">`;
+}
+
+function fieldRow(label, input, help) {
+    const hint = help ? `<div style="opacity: 0.6; font-size: 0.8em">${escape(help)}</div>` : "";
+    return `<label style="display: block; margin: 4px 0"><div>${escape(label)} ${input}</div>${hint}</label>`;
+}
+
+async function printerFieldRows(data, printer) {
+    const rows = await Promise.all((await printerFields(data, printer)).map(async ([name, field]) =>
+        fieldRow(field.label ?? name, await fieldInput(data, name, field), field.help_text)));
+    return rows.join("");
+}
+
+function optionValue(input) {
+    if (input.type === "checkbox") {
+        return input.checked;
+    }
+    return input.type === "number" && input.value !== "" ? Number(input.value) : input.value;
+}
+
+function chosenOptions(form) {
+    return Object.fromEntries([...form.querySelectorAll("[data-option]")].map((input) => [input.dataset.option, optionValue(input)]));
+}
+
+async function printDialog(data, count) {
+    const [templates, printers] = await Promise.all([
+        apiRequest(data, "GET", "/api/label/template/?model_type=stockitem&enabled=true"),
+        apiRequest(data, "GET", "/api/plugins/?mixin=labels&active=true"),
+    ]);
+    const templateChoices = listOf(templates).map((entry) => ({ value: entry.pk, display_name: entry.name }));
+    const printerChoices = listOf(printers).map((entry) => ({ value: entry.key, display_name: entry.meta?.human_name ?? entry.name }));
+    const defaultTemplate = templateChoices.find((choice) => choice.display_name === LABEL_TEMPLATE)?.value;
+    return `<div data-print-dialog style="border: 1px solid rgba(128, 128, 128, 0.5); border-radius: 4px; padding: 8px; margin-bottom: 8px">` +
+        `<b>Print ${count} labels</b>` +
+        fieldRow("Template", choiceSelect("template", templateChoices, defaultTemplate)) +
+        fieldRow("Printing plugin", choiceSelect("plugin", printerChoices, LABEL_PRINTER)) +
+        `<div data-printer-fields>${await printerFieldRows(data, LABEL_PRINTER)}</div>` +
+        `<button type="button" data-dialog="print">Print</button> <button type="button" data-dialog="cancel">Cancel</button></div>`;
+}
+
+/** @implNote Printing runs in InvenTree's background worker: the request returns a job, which is polled until it holds the PDF. */
+async function printLabels(data, pks, options) {
+    let job = await apiRequest(data, "POST", PRINT_ENDPOINT, { ...options, items: pks });
     for (let attempt = 0; !job.complete && attempt < PRINT_POLL_LIMIT; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, PRINT_POLL_MS));
         job = await apiRequest(data, "GET", `/api/data-output/${job.pk}/`);
@@ -538,9 +611,33 @@ export function renderStickersMenu(target, data) {
             status("select stickers first");
             return;
         }
-        status(`printing ${pks.length}...`);
-        printLabels(data, pks)
-            .then((output) => { status(`printed ${pks.length}`); window.open(output, "_blank"); })
-            .catch((error) => status(`printing failed: ${error.message}`));
+        openPrintDialog(target, data, pks, status);
     });
+}
+
+function openPrintDialog(target, data, pks, status) {
+    target.querySelector("[data-print-dialog]")?.remove();
+    status("loading print options...");
+    printDialog(data, pks.length).then((html) => {
+        status("");
+        const toolbar = target.querySelector("[data-progress]").parentElement;
+        toolbar.insertAdjacentHTML("afterend", html);
+        const dialog = target.querySelector("[data-print-dialog]");
+        const printerFieldsBox = dialog.querySelector("[data-printer-fields]");
+        dialog.querySelector("[data-option=plugin]").addEventListener("change", (event) => {
+            printerFieldsBox.innerHTML = "";
+            printerFieldRows(data, event.target.value)
+                .then((rows) => { printerFieldsBox.innerHTML = rows; })
+                .catch((error) => status(`loading options failed: ${error.message}`));
+        });
+        dialog.querySelector("[data-dialog=cancel]").addEventListener("click", () => dialog.remove());
+        dialog.querySelector("[data-dialog=print]").addEventListener("click", () => {
+            const options = chosenOptions(dialog);
+            dialog.remove();
+            status(`printing ${pks.length}...`);
+            printLabels(data, pks, options)
+                .then((output) => { status(`printed ${pks.length}`); window.open(output, "_blank"); })
+                .catch((error) => status(`printing failed: ${error.message}`));
+        });
+    }).catch((error) => status(`loading print options failed: ${error.message}`));
 }
