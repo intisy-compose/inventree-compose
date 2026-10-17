@@ -403,25 +403,56 @@ export function renderMachinesMenu(target, data) {
     frame(target, machines.length ? machines.map(machineNode).join("") : `<p style="opacity: 0.7">No machines here.</p>`);
 }
 
-function saveSticker(data, pk, stuck) {
-    const body = { metadata: { sticker: stuck } };
-    const url = `/api/metadata/stockitem/${pk}/`;
+const LABEL_TEMPLATE = "Asset labels";
+const LABEL_PRINTER = "asset-labels";
+const PRINT_POLL_MS = 1500;
+const PRINT_POLL_LIMIT = 120;
+
+function apiRequest(data, method, url, body) {
     if (data?.api) {
-        return data.api.patch(url, body);
+        const call = method === "GET" ? data.api.get(url) : data.api[method.toLowerCase()](url, body);
+        return call.then((response) => response.data);
     }
     const token = document.cookie.split("; ").find((entry) => entry.startsWith("csrftoken="))?.split("=")[1] ?? "";
     return fetch(url, {
-        method: "PATCH", credentials: "same-origin", body: JSON.stringify(body),
+        method, credentials: "same-origin", body: body === undefined ? undefined : JSON.stringify(body),
         headers: { "Content-Type": "application/json", "X-CSRFToken": token },
     }).then((response) => {
         if (!response.ok) {
             throw new Error(response.statusText);
         }
+        return response.status === 204 ? null : response.json();
     });
+}
+
+function saveSticker(data, pk, stuck) {
+    return apiRequest(data, "PATCH", `/api/metadata/stockitem/${pk}/`, { metadata: { sticker: stuck } });
+}
+
+/** @implNote Printing runs in InvenTree's background worker: the request returns a job, which is polled until it holds the PDF. */
+async function printLabels(data, pks) {
+    const templates = await apiRequest(data, "GET", "/api/label/template/?model_type=stockitem");
+    const template = (templates.results ?? templates).find((entry) => entry.name === LABEL_TEMPLATE);
+    if (!template) {
+        throw new Error(`no label template named ${LABEL_TEMPLATE}`);
+    }
+    let job = await apiRequest(data, "POST", "/api/label/print/", { template: template.pk, plugin: LABEL_PRINTER, items: pks });
+    for (let attempt = 0; !job.complete && attempt < PRINT_POLL_LIMIT; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, PRINT_POLL_MS));
+        job = await apiRequest(data, "GET", `/api/data-output/${job.pk}/`);
+    }
+    if (!job.complete || !job.output) {
+        throw new Error(job.errors ? JSON.stringify(job.errors) : "printing did not finish");
+    }
+    return job.output;
 }
 
 function stickerNote(size, stuck) {
     return stuck ? `${size}, stuck on ${stuck}` : size;
+}
+
+function doneToggleText(stuck) {
+    return stuck ? "✓ done" : "mark done";
 }
 
 function stickerRow(row) {
@@ -429,41 +460,87 @@ function stickerRow(row) {
     if (row.kind === "group") {
         return `<div style="${indent}; margin-top: 6px; font-weight: 600">${escape(row.name)}</div>`;
     }
-    return `<label data-sticker data-size="${escape(row.size)}" style="display: block; ${indent}; cursor: pointer">` +
-        `<input type="checkbox" data-pk="${row.pk}" ${row.stuck ? "checked" : ""}> ${link(row)} ${escape(row.name)} ` +
-        `<span style="opacity: 0.6">${escape(stickerNote(row.size, row.stuck))}</span></label>`;
+    return `<div data-sticker data-pk="${row.pk}" data-size="${escape(row.size)}" data-stuck="${escape(row.stuck ?? "")}" ` +
+        `style="${indent}; display: flex; align-items: center; gap: 6px">` +
+        `<input type="checkbox" data-select title="Select for printing or marking"> ${link(row)} ${escape(row.name)} ` +
+        `<button type="button" data-toggle style="font-size: 0.8em; padding: 0 6px; cursor: pointer">${doneToggleText(row.stuck)}</button>` +
+        `<span data-note style="opacity: 0.6">${escape(stickerNote(row.size, row.stuck))}</span></div>`;
 }
+
+const STICKER_TOOLBAR = `<div style="margin-bottom: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px">` +
+    `<b data-progress></b>` +
+    `<label style="cursor: pointer"><input type="checkbox" data-missing> only missing</label>` +
+    `<button type="button" data-action="select-all">Select all shown</button>` +
+    `<button type="button" data-action="print">Print selected</button>` +
+    `<button type="button" data-action="done">Mark selected done</button>` +
+    `<button type="button" data-action="not-done">Mark selected not done</button>` +
+    `<span data-status style="opacity: 0.7"></span></div>`;
 
 export function renderStickersMenu(target, data) {
     const context = data?.context ?? {};
     const total = context.total ?? 0;
     let stuck = context.stuck ?? 0;
-    const progress = () => `${stuck} of ${total} stuck on`;
-    frame(target, `<div style="margin-bottom: 8px"><b data-progress>${progress()}</b>` +
-        `<label style="margin-left: 18px; cursor: pointer"><input type="checkbox" data-missing> only missing</label></div>` +
-        (context.rows ?? []).map(stickerRow).join(""));
+    frame(target, STICKER_TOOLBAR + (context.rows ?? []).map(stickerRow).join(""));
     if (!target) {
         return;
     }
+    const rows = () => [...target.querySelectorAll("div[data-sticker]")];
+    const selected = () => rows().filter((row) => row.style.display !== "none" && row.querySelector("input[data-select]").checked);
+    const status = (text) => { target.querySelector("[data-status]").textContent = text; };
+    const showProgress = () => { target.querySelector("[data-progress]").textContent = `${stuck} of ${total} stuck on`; };
     const onlyMissing = target.querySelector("input[data-missing]");
-    const filter = () => target.querySelectorAll("label[data-sticker]").forEach((label) => {
-        label.style.display = onlyMissing.checked && label.querySelector("input").checked ? "none" : "block";
+    const filter = () => rows().forEach((row) => {
+        row.style.display = onlyMissing.checked && row.dataset.stuck ? "none" : "flex";
     });
-    onlyMissing.addEventListener("change", filter);
-    target.querySelectorAll("input[data-pk]").forEach((box) => box.addEventListener("change", () => {
+
+    const setDone = (row, done) => {
         const today = new Date().toISOString().slice(0, 10);
-        const label = box.closest("label");
-        box.disabled = true;
-        saveSticker(data, box.dataset.pk, box.checked ? today : null).then(() => {
-            stuck += box.checked ? 1 : -1;
-            target.querySelector("[data-progress]").textContent = progress();
-            label.querySelector("span").textContent = stickerNote(label.dataset.size, box.checked ? today : null);
-            filter();
-        }).catch(() => {
-            box.checked = !box.checked;
-            target.querySelector("[data-progress]").textContent = `${progress()} (saving failed, try again)`;
-        }).finally(() => {
-            box.disabled = false;
+        const value = done ? today : null;
+        if (Boolean(row.dataset.stuck) === done) {
+            return Promise.resolve();
+        }
+        return saveSticker(data, row.dataset.pk, value).then(() => {
+            stuck += done ? 1 : -1;
+            row.dataset.stuck = value ?? "";
+            row.querySelector("[data-toggle]").textContent = doneToggleText(value);
+            row.querySelector("[data-note]").textContent = stickerNote(row.dataset.size, value);
         });
+    };
+    const markSelected = (done) => {
+        const chosen = selected();
+        if (!chosen.length) {
+            status("select stickers first");
+            return;
+        }
+        status("saving...");
+        Promise.all(chosen.map((row) => setDone(row, done)))
+            .then(() => status(`${chosen.length} marked ${done ? "done" : "not done"}`))
+            .catch(() => status("saving failed, try again"))
+            .finally(() => { showProgress(); filter(); });
+    };
+
+    showProgress();
+    onlyMissing.addEventListener("change", filter);
+    rows().forEach((row) => row.querySelector("[data-toggle]").addEventListener("click", () => {
+        setDone(row, !row.dataset.stuck)
+            .catch(() => status("saving failed, try again"))
+            .finally(() => { showProgress(); filter(); });
     }));
+    target.querySelector("[data-action=select-all]").addEventListener("click", () => {
+        rows().filter((row) => row.style.display !== "none")
+            .forEach((row) => { row.querySelector("input[data-select]").checked = true; });
+    });
+    target.querySelector("[data-action=done]").addEventListener("click", () => markSelected(true));
+    target.querySelector("[data-action=not-done]").addEventListener("click", () => markSelected(false));
+    target.querySelector("[data-action=print]").addEventListener("click", () => {
+        const pks = selected().map((row) => Number(row.dataset.pk));
+        if (!pks.length) {
+            status("select stickers first");
+            return;
+        }
+        status(`printing ${pks.length}...`);
+        printLabels(data, pks)
+            .then((output) => { status(`printed ${pks.length}`); window.open(output, "_blank"); })
+            .catch((error) => status(`printing failed: ${error.message}`));
+    });
 }
