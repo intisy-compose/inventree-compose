@@ -531,40 +531,125 @@ function doneToggleText(stuck) {
 function stickerRow(row) {
     const indent = `padding-left: ${row.depth * 16}px`;
     if (row.kind === "group") {
-        return `<div style="${indent}; margin-top: 6px; font-weight: 600">${escape(row.name)}</div>`;
+        return `<div data-group data-depth="${row.depth}" style="${indent}; margin-top: 6px; font-weight: 600">${escape(row.name)}</div>`;
     }
-    return `<div data-sticker data-pk="${row.pk}" data-size="${escape(row.size)}" data-stuck="${escape(row.stuck ?? "")}" ` +
-        `style="${indent}; display: flex; align-items: center; gap: 6px">` +
+    return `<div data-sticker data-depth="${row.depth}" data-pk="${row.pk}" data-size="${escape(row.size)}" data-stuck="${escape(row.stuck ?? "")}" ` +
+        `data-search="${escape(`${row.id} ${row.name}`.toLowerCase())}" data-category="${escape(row.category ?? "")}" ` +
+        `data-places="${escape((row.places ?? []).join(" "))}" style="${indent}; display: flex; align-items: center; gap: 6px">` +
         `<input type="checkbox" data-select title="Select for printing or marking"> ${link(row)} ${escape(row.name)} ` +
         `<button type="button" data-toggle style="font-size: 0.8em; padding: 0 6px; cursor: pointer">${doneToggleText(row.stuck)}</button>` +
         `<span data-note style="opacity: 0.6">${escape(stickerNote(row.size, row.stuck))}</span></div>`;
 }
 
-const STICKER_TOOLBAR = `<div style="margin-bottom: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px">` +
-    `<b data-progress></b>` +
-    `<label style="cursor: pointer"><input type="checkbox" data-missing> only missing</label>` +
-    `<button type="button" data-action="select-all">Select all shown</button>` +
-    `<button type="button" data-action="print">Print selected</button>` +
-    `<button type="button" data-action="done">Mark selected done</button>` +
-    `<button type="button" data-action="not-done">Mark selected not done</button>` +
-    `<span data-status style="opacity: 0.7"></span></div>`;
+function filterSelect(name, everything, choices, chosen = "") {
+    const options = [["", everything], ...choices].map(([value, label]) =>
+        `<option value="${escape(value)}"${value === chosen ? " selected" : ""}>${escape(label)}</option>`);
+    return `<select data-filter="${name}">${options.join("")}</select>`;
+}
+
+function placeSelect(places) {
+    const group = (kind, label) => {
+        const options = places.filter((place) => place.kind === kind)
+            .map((place) => `<option value="${escape(place.key)}">${escape(place.name)}</option>`).join("");
+        return options ? `<optgroup label="${label}">${options}</optgroup>` : "";
+    };
+    return `<select data-filter="place"><option value="">every location</option>${group("location", "Locations")}` +
+        `${group("machine", "Machines")}</select>`;
+}
+
+const DONE_CHOICES = [["missing", "not done"], ["done", "done"], ["all", "done and not done"]];
+
+function stickerToolbar(context) {
+    const done = DONE_CHOICES.map(([value, label]) =>
+        `<option value="${value}"${value === "missing" ? " selected" : ""}>${label}</option>`).join("");
+    const pairs = (values) => values.map((value) => [value, value]);
+    return `<div style="margin-bottom: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px">` +
+        `<input type="search" data-filter="search" placeholder="Asset ID or name">` +
+        placeSelect(context.places ?? []) +
+        filterSelect("category", "every category", pairs(context.categories ?? [])) +
+        filterSelect("size", "every size", pairs(context.sizes ?? [])) +
+        `<select data-filter="done">${done}</select></div>` +
+        `<div style="margin-bottom: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px">` +
+        `<b data-progress></b>` +
+        `<button type="button" data-action="select-all">Select all shown</button>` +
+        `<button type="button" data-action="unselect-all">Unselect all shown</button>` +
+        `<button type="button" data-action="print">Print selected</button>` +
+        `<button type="button" data-action="done">Mark selected done</button>` +
+        `<button type="button" data-action="not-done">Mark selected not done</button>` +
+        `<span data-status style="opacity: 0.7"></span></div>`;
+}
+
+function stickerFilters(target) {
+    const value = (name) => target.querySelector(`[data-filter=${name}]`).value;
+    return { search: value("search").trim().toLowerCase(), place: value("place"), category: value("category"),
+        size: value("size"), done: value("done") };
+}
+
+function stickerMatches(row, filters) {
+    const { search, places, category, size, stuck } = row.dataset;
+    return (!filters.search || search.includes(filters.search))
+        && (!filters.place || places.split(" ").includes(filters.place))
+        && (!filters.category || category === filters.category)
+        && (!filters.size || size === filters.size)
+        && (filters.done === "all" || Boolean(stuck) === (filters.done === "done"));
+}
+
+function hasShownSticker(lines, groupIndex) {
+    const depth = Number(lines[groupIndex].dataset.depth);
+    for (let index = groupIndex + 1; index < lines.length && Number(lines[index].dataset.depth) > depth; index++) {
+        if (lines[index].matches("[data-sticker]") && lines[index].style.display !== "none") {
+            return true;
+        }
+    }
+    return false;
+}
+
+function showWhen(element, visible) {
+    element.style.display = visible ? "" : "none";
+}
 
 export function renderStickersMenu(target, data) {
     const context = data?.context ?? {};
     const total = context.total ?? 0;
     let stuck = context.stuck ?? 0;
-    frame(target, STICKER_TOOLBAR + (context.rows ?? []).map(stickerRow).join(""));
+    frame(target, stickerToolbar(context) + (context.rows ?? []).map(stickerRow).join(""));
     if (!target) {
         return;
     }
     const rows = () => [...target.querySelectorAll("div[data-sticker]")];
-    const selected = () => rows().filter((row) => row.style.display !== "none" && row.querySelector("input[data-select]").checked);
+    const shown = () => rows().filter((row) => row.style.display !== "none");
+    const tick = (row) => row.querySelector("input[data-select]");
+    const selected = () => shown().filter((row) => tick(row).checked);
+    const action = (name) => target.querySelector(`[data-action=${name}]`);
     const status = (text) => { target.querySelector("[data-status]").textContent = text; };
-    const showProgress = () => { target.querySelector("[data-progress]").textContent = `${stuck} of ${total} stuck on`; };
-    const onlyMissing = target.querySelector("input[data-missing]");
-    const filter = () => rows().forEach((row) => {
-        row.style.display = onlyMissing.checked && row.dataset.stuck ? "none" : "flex";
-    });
+
+    const update = () => {
+        const visible = shown().length;
+        const chosen = selected().length;
+        target.querySelector("[data-progress]").textContent =
+            `${stuck} of ${total} stuck on · ${visible} shown${chosen ? ` · ${chosen} selected` : ""}`;
+        showWhen(action("select-all"), chosen < visible);
+        showWhen(action("unselect-all"), chosen > 0);
+        ["print", "done", "not-done"].forEach((name) => showWhen(action(name), chosen > 0));
+    };
+    /** @implNote A row the filters hide is unticked too, so the selection is always what is on screen. */
+    const filter = () => {
+        const filters = stickerFilters(target);
+        rows().forEach((row) => {
+            const match = stickerMatches(row, filters);
+            row.style.display = match ? "flex" : "none";
+            if (!match) {
+                tick(row).checked = false;
+            }
+        });
+        const lines = [...target.querySelectorAll("div[data-sticker], div[data-group]")];
+        lines.forEach((line, index) => {
+            if (line.matches("[data-group]")) {
+                showWhen(line, hasShownSticker(lines, index));
+            }
+        });
+        update();
+    };
 
     const setDone = (row, done) => {
         const today = new Date().toISOString().slice(0, 10);
@@ -581,38 +666,33 @@ export function renderStickersMenu(target, data) {
     };
     const markSelected = (done) => {
         const chosen = selected();
-        if (!chosen.length) {
-            status("select stickers first");
-            return;
-        }
         status("saving...");
         Promise.all(chosen.map((row) => setDone(row, done)))
             .then(() => status(`${chosen.length} marked ${done ? "done" : "not done"}`))
             .catch(() => status("saving failed, try again"))
-            .finally(() => { showProgress(); filter(); });
+            .finally(filter);
+    };
+    const tickShown = (checked) => {
+        shown().forEach((row) => { tick(row).checked = checked; });
+        update();
     };
 
-    showProgress();
-    onlyMissing.addEventListener("change", filter);
-    rows().forEach((row) => row.querySelector("[data-toggle]").addEventListener("click", () => {
-        setDone(row, !row.dataset.stuck)
-            .catch(() => status("saving failed, try again"))
-            .finally(() => { showProgress(); filter(); });
-    }));
-    target.querySelector("[data-action=select-all]").addEventListener("click", () => {
-        rows().filter((row) => row.style.display !== "none")
-            .forEach((row) => { row.querySelector("input[data-select]").checked = true; });
+    target.querySelectorAll("[data-filter]").forEach((input) =>
+        input.addEventListener(input.dataset.filter === "search" ? "input" : "change", filter));
+    rows().forEach((row) => {
+        tick(row).addEventListener("change", update);
+        row.querySelector("[data-toggle]").addEventListener("click", () => {
+            setDone(row, !row.dataset.stuck)
+                .catch(() => status("saving failed, try again"))
+                .finally(filter);
+        });
     });
-    target.querySelector("[data-action=done]").addEventListener("click", () => markSelected(true));
-    target.querySelector("[data-action=not-done]").addEventListener("click", () => markSelected(false));
-    target.querySelector("[data-action=print]").addEventListener("click", () => {
-        const pks = selected().map((row) => Number(row.dataset.pk));
-        if (!pks.length) {
-            status("select stickers first");
-            return;
-        }
-        openPrintDialog(target, data, pks, status);
-    });
+    action("select-all").addEventListener("click", () => tickShown(true));
+    action("unselect-all").addEventListener("click", () => tickShown(false));
+    action("done").addEventListener("click", () => markSelected(true));
+    action("not-done").addEventListener("click", () => markSelected(false));
+    action("print").addEventListener("click", () => openPrintDialog(target, data, selected().map((row) => Number(row.dataset.pk)), status));
+    filter();
 }
 
 function openPrintDialog(target, data, pks, status) {

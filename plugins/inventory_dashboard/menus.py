@@ -72,6 +72,31 @@ class Scope:
     def sorted_items(self):
         return sorted(self.items.values(), key=lambda item: item.serial)
 
+    def machines(self):
+        return [item for item in self.sorted_items() if self.installed(item)]
+
+    def hosts_of(self, item):
+        """The item itself when it is a machine, then every machine it is installed in, innermost first."""
+        hosts = [item] if self.installed(item) else []
+        while item.belongs_to_id in self.items:
+            item = self.items[item.belongs_to_id]
+            hosts.append(item)
+        return hosts
+
+    def places_of(self, item):
+        """Filter keys for every place the item is in: its machines, and the locations around the outermost one."""
+        hosts = self.hosts_of(item)
+        location_pk = (hosts[-1] if hosts else item).location_id
+        keys = [place_key("machine", host.pk) for host in hosts]
+        while location_pk is not None:
+            keys.append(place_key("location", location_pk))
+            location_pk = self.inventory.locations.get(location_pk, {}).get("parent")
+        return keys
+
+
+def place_key(kind, pk):
+    return f"{kind}-{pk}"
+
 
 def value_menu(scope):
     rows = [{**link_of(item), "category": item.part.category.name if item.part.category else "",
@@ -144,7 +169,8 @@ def sticker_menu(scope):
         size = label_size(item)
         if size not in PRINTED_SIZES:
             return None
-        return {"kind": "sticker", **link_of(item), "size": size, "stuck": (item.metadata or {}).get(STICKER_KEY)}
+        return {"kind": "sticker", **link_of(item), "size": size, "stuck": (item.metadata or {}).get(STICKER_KEY),
+                "category": item.part.category.name if item.part.category else "", "places": scope.places_of(item)}
 
     def own_rows(items, depth):
         found = [row for row in (sticker(item) for item in items) if row]
@@ -179,4 +205,14 @@ def sticker_menu(scope):
         rows += group("No location", [item for item in scope.placed_at(None) if not scope.installed(item)],
                       [(f"{item.serial} {item.part.name}", machine(item)) for item in scope.placed_at(None) if scope.installed(item)], 0)
     stickers = [row for row in rows if row["kind"] == "sticker"]
-    return {"rows": rows, "total": len(stickers), "stuck": sum(bool(row["stuck"]) for row in stickers)}
+    return {"rows": rows, "total": len(stickers), "stuck": sum(bool(row["stuck"]) for row in stickers),
+            "places": sticker_places(scope), "categories": sorted({row["category"] for row in stickers}),
+            "sizes": [size for size in PRINTED_SIZES if any(row["size"] == size for row in stickers)]}
+
+
+def sticker_places(scope):
+    locations = sorted(scope.location_pks, key=lambda pk: scope.inventory.locations[pk]["pathstring"])
+    return ([{"key": place_key("location", pk), "kind": "location", "name": scope.inventory.locations[pk]["pathstring"]}
+             for pk in locations] +
+            [{"key": place_key("machine", item.pk), "kind": "machine", "name": f"{item.serial} {item.part.name}"}
+             for item in scope.machines()])
