@@ -6,7 +6,9 @@ $forwarded = $args
 
 Set-StrictMode -Version Latest
 
-$configFile  = Join-Path $PSScriptRoot "config.env"
+. (Join-Path $PSScriptRoot "scripts\data-on-disk.ps1")
+
+$configFile = Join-Path $PSScriptRoot "config.env"
 $exampleFile = Join-Path $PSScriptRoot "config.env.example"
 $composeArgs = @("--env-file", $configFile)
 $secretNames = @("INVENTREE_ADMIN_PASSWORD", "POSTGRES_PASSWORD")
@@ -149,6 +151,23 @@ function Invoke-Restore([object[]]$RestoreArguments) {
     Write-OK "Restored $file."
 }
 
+function Format-DumpAge([datetime]$WrittenAt) {
+    $age = (Get-Date) - $WrittenAt
+    if ($age.TotalHours -ge 24) { return "{0} d {1} h old" -f [int]$age.Days, [int]$age.Hours }
+    if ($age.TotalHours -ge 1) { return "{0} h {1} min old" -f [int]$age.Hours, [int]$age.Minutes }
+    return "{0} min old" -f [int]$age.TotalMinutes
+}
+
+function Get-InventreeDumpToRestore {
+    Get-DumpToRestore "inventree-compose_inventree-db" (Join-Path $PSScriptRoot "data\backups") "inventree-*.dump"
+}
+
+function Restore-EmptyDatabase([System.IO.FileInfo]$Dump) {
+    if (-not $Dump) { return }
+    Write-Step "Restoring $($Dump.Name) ($(Format-DumpAge $Dump.LastWriteTime)) into the empty database..."
+    Invoke-Restore @($Dump.Name)
+}
+
 function Invoke-Data([object[]]$DataArguments) {
     $subcommand = if ($DataArguments) { "$($DataArguments[0])".ToLower() } else { "status" }
     switch ($subcommand) {
@@ -194,7 +213,7 @@ Set-Location $PSScriptRoot
 
 switch ($Command.ToLower()) {
     "init-config" { Initialize-Config; break }
-    "up"      { Assert-Config; Connect-Tailnet; Write-Step "Starting InvenTree..."; docker compose @composeArgs up -d; if ($LASTEXITCODE -eq 0) { Initialize-StaticFiles; Show-Urls }; break }
+    "up"      { Assert-Config; $dumpToRestore = Get-InventreeDumpToRestore; Connect-Tailnet; Write-Step "Starting InvenTree..."; docker compose @composeArgs up -d; if ($LASTEXITCODE -eq 0) { Restore-EmptyDatabase $dumpToRestore; Initialize-StaticFiles; Show-Urls }; break }
     "down"    { Write-Step "Stopping everything..."; docker compose @composeArgs down; break }
     "restart" { Assert-Config; Connect-Tailnet; Write-Step "Recreating..."; docker compose @composeArgs up -d --force-recreate; if ($LASTEXITCODE -eq 0) { Initialize-StaticFiles }; Show-Urls; break }
     "url"     { Show-Urls; break }
