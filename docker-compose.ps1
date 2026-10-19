@@ -7,6 +7,7 @@ $forwarded = $args
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot "scripts\data-on-disk.ps1")
+. (Join-Path $PSScriptRoot "scripts\prove-data.ps1")
 
 $configFile = Join-Path $PSScriptRoot "config.env"
 $exampleFile = Join-Path $PSScriptRoot "config.env.example"
@@ -205,6 +206,7 @@ $usage = @{
     "logs"        = "[service]  follow logs, e.g. logs server"
     "backup"      = "Dump the database to data\backups now"
     "restore"     = "[file]  restore the database from data\backups (newest by default)"
+    "prove-data"  = "DESTRUCTIVE: dump, delete every volume, start, and compare every table (needs the stack up)"
     "data"        = "status | use [owner/repo[@ref]]  point data/ at a data repo (none = template)"
     "catalog"     = "check | sync | add <file> | update <file> | list | images | previews [model]  (see CATALOG.md in data/)"
 }
@@ -221,6 +223,7 @@ switch ($Command.ToLower()) {
     "logs"    { docker compose @composeArgs logs -f @forwarded; break }
     "backup"  { Assert-Config; Invoke-Backup; break }
     "restore" { Assert-Config; Invoke-Restore $forwarded; break }
+    "prove-data" { Assert-Config; Invoke-ProveData; break }
     "data"    { Invoke-Data $forwarded; break }
     "catalog" { Assert-Config; & python (Join-Path $PSScriptRoot "scripts\catalog.py") @forwarded; exit $LASTEXITCODE }
     default   { Show-Usage -Commands $usage; exit 1 }
