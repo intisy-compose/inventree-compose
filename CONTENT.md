@@ -83,8 +83,10 @@ sync` activates both plugins and creates the template.
 
 ## Data and backups
 
-The database and InvenTree's uploaded files live in the Docker volumes `inventree-compose_inventree-db`
-and `inventree-compose_inventree-files`, because Postgres on a Windows bind mount fails on file permissions.
+The database lives in the Docker volume `inventree-compose_inventree-db`, because Postgres on a Windows
+bind mount fails on file permissions. InvenTree's secrets (`secret_key.txt`, `oidc.pem`, `config.yaml`)
+are in `data/secrets` and its uploaded files in `data/media` (both gitignored); the volume
+`inventree-compose_inventree-files` keeps only static files and can be rebuilt.
 `db-backup` dumps the database every hour into `data/backups` and keeps the newest `BACKUP_KEEP`
 (48). `.\docker-compose.ps1 backup` takes one now and `restore [file]` puts one back (the newest by
 default). Part images come back with `catalog images`.
