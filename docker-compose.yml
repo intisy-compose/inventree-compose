@@ -30,9 +30,15 @@ x-inventree: &inventree
     INVENTREE_TIMEZONE: ${TIMEZONE:-Europe/Berlin}
     INVENTREE_PLUGINS_ENABLED: "True"
     INVENTREE_PLUGIN_DIR: /home/inventree/plugins
+    INVENTREE_CONFIG_FILE: /home/inventree/secrets/config.yaml
+    INVENTREE_SECRET_KEY_FILE: /home/inventree/secrets/secret_key.txt
+    INVENTREE_OIDC_PRIVATE_KEY_FILE: /home/inventree/secrets/oidc.pem
+    INVENTREE_MEDIA_ROOT: /home/inventree/media
   volumes:
     - inventree-files:/home/inventree/data
     - ./plugins:/home/inventree/plugins:ro
+    - ./data/secrets:/home/inventree/secrets
+    - ./data/media:/home/inventree/media
 
 services:
   # Owns the network namespace and publishes the local port, on loopback only, so the local address
@@ -50,6 +56,7 @@ services:
       - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
       - tailscale-socket:/var/run/tailscale
       - inventree-files:/srv/inventree:ro
+      - ./data/media:/srv/inventree/media:ro
       - inventree-caddy-data:/data
 
   # Joins the gateway's namespace and forwards tailnet :443 to Caddy. The node key lives in
@@ -145,6 +152,12 @@ services:
           ls -1t /backups/inventree-*.dump 2>/dev/null | tail -n +$$(( ${BACKUP_KEEP:-48} + 1 )) | while read -r old; do rm -f "$$old"; log "deleted $$(basename "$$old")"; done
           sleep 3600
         done
+
+x-volume-roles:
+  inventree-db: dumped
+  inventree-files: rebuilt
+  inventree-caddy-data: rebuilt
+  tailscale-socket: rebuilt
 
 volumes:
   inventree-db:
