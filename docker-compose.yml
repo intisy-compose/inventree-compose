@@ -1,7 +1,7 @@
 # InvenTree inventory management, reachable over Tailscale and on this PC's 127.0.0.1:8441. Every
 # image is pinned; start it through docker-compose.ps1, which passes --env-file config.env and fills
 # in the tailnet URL once the node has joined.
-name: inventree
+name: inventree-compose
 
 x-inventree: &inventree
   image: inventree/inventree:1.5.6
