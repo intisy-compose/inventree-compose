@@ -41,46 +41,24 @@ x-inventree: &inventree
     - ./data/media:/home/inventree/media
 
 services:
-  # Owns the network namespace and publishes the local port, on loopback only, so the local address
-  # keeps working while tailscale restarts or cannot join. It answers 502 until the server is up,
-  # and starts without it so `up` can join the tailnet before the server needs the ts.net name.
+  # Answers 502 until the server is up, and starts without it so `up` can join the tailnet before
+  # the server needs the ts.net name.
   gateway:
-    image: caddy:2.11.4-alpine
+    extends: { file: gateway/gateway.yml, service: gateway }
     container_name: inventree-gateway
-    restart: unless-stopped
     ports:
       - "127.0.0.1:8441:8441"
     environment:
-      INVENTREE_HOST: ${INVENTREE_HOST:-inventree.invalid}
+      TAILNET_HOST: ${INVENTREE_HOST:-inventree.invalid}
     volumes:
-      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
-      - tailscale-socket:/var/run/tailscale
       - inventree-files:/srv/inventree:ro
       - ./data/media:/srv/media:ro
-      - inventree-caddy-data:/data
 
-  # Joins the gateway's namespace and forwards tailnet :443 to Caddy. The node key lives in
-  # data/tailscale; TS_AUTHKEY is only needed for the first join.
   tailscale:
-    image: tailscale/tailscale:v1.102.4
+    extends: { file: gateway/gateway.yml, service: tailscale }
     container_name: inventree-tailscale
-    restart: unless-stopped
-    network_mode: "service:gateway"
     environment:
-      TS_AUTHKEY: ${TS_AUTHKEY:-}
       TS_HOSTNAME: ${TS_HOSTNAME:-inventree}
-      TS_STATE_DIR: /var/lib/tailscale
-      TS_USERSPACE: "true"
-      TS_SOCKET: /var/run/tailscale/tailscaled.sock
-      TS_SERVE_CONFIG: /config/serve.json
-    volumes:
-      - ./data/tailscale:/var/lib/tailscale
-      - ./gateway/serve.json:/config/serve.json:ro
-      - tailscale-socket:/var/run/tailscale
-    depends_on:
-      gateway:
-        condition: service_started
-        restart: true
 
   server:
     <<: *inventree
@@ -160,11 +138,11 @@ services:
 x-volume-roles:
   inventree-db: dumped
   inventree-files: rebuilt
-  inventree-caddy-data: rebuilt
+  gateway-caddy-data: rebuilt
   tailscale-socket: rebuilt
 
 volumes:
   inventree-db:
   inventree-files:
-  inventree-caddy-data:
+  gateway-caddy-data:
   tailscale-socket:
