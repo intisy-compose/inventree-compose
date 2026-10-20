@@ -1,10 +1,13 @@
 #Requires -Version 5.1
-param([string]$Command = "up")
+param([string]$Command = "up", [switch]$Fresh)
 
 # $args, not ValueFromRemainingArguments, so -Switch tokens still bind when forwarded.
 $forwarded = $args
 
 Set-StrictMode -Version Latest
+
+# The pinned `name:` must win, because the restore guard checks the volume by that name.
+Remove-Item Env:\COMPOSE_PROJECT_NAME -ErrorAction SilentlyContinue
 
 . (Join-Path $PSScriptRoot "scripts\data-on-disk.ps1")
 . (Join-Path $PSScriptRoot "scripts\prove-data.ps1")
@@ -12,6 +15,7 @@ Set-StrictMode -Version Latest
 $configFile = Join-Path $PSScriptRoot "config.env"
 $exampleFile = Join-Path $PSScriptRoot "config.env.example"
 $composeArgs = @("--env-file", $configFile)
+$databaseVolume = "inventree-compose_inventree-db"
 $secretNames = @("INVENTREE_ADMIN_PASSWORD", "POSTGRES_PASSWORD")
 
 function Write-Step([string]$msg) { Write-Host $msg -ForegroundColor Cyan }
@@ -168,19 +172,25 @@ function Get-BackupImage {
 
 <#
 .SYNOPSIS
-True when pg_restore can list the dump and the listing holds table data.
+Why the dump cannot be restored, or an empty string when pg_restore can list it and it holds table data.
 .NOTES
 Runs in a throwaway container of the stack's own postgres client image with data/backups mounted
 read-only, so it works while the stack is down. An empty database dumps to a valid file with no table data.
 #>
-function Test-DumpIsRestorable([System.IO.FileInfo]$Dump) {
+function Get-DumpRejection([System.IO.FileInfo]$Dump) {
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
         $listing = docker run --rm -v "$($Dump.DirectoryName):/backups:ro" (Get-BackupImage) pg_restore --list "/backups/$($Dump.Name)" 2>$null
-        return ($LASTEXITCODE -eq 0) -and [bool]($listing | Where-Object { $_ -match "TABLE DATA" })
+        if ($LASTEXITCODE -ne 0) { return "pg_restore cannot list it (exit $LASTEXITCODE)" }
+        if (-not ($listing | Where-Object { $_ -match "TABLE DATA" })) { return "it holds no table data" }
+        return ""
     }
     finally { $ErrorActionPreference = $previousPreference }
+}
+
+function Test-DumpIsRestorable([System.IO.FileInfo]$Dump) {
+    return -not (Get-DumpRejection $Dump)
 }
 
 function Format-DumpAge([datetime]$WrittenAt) {
@@ -190,36 +200,99 @@ function Format-DumpAge([datetime]$WrittenAt) {
     return "{0} min old" -f [int]$age.TotalMinutes
 }
 
-function Get-InventreeDumpToRestore {
-    Get-DumpToRestore "inventree-compose_inventree-db" (Join-Path $PSScriptRoot "data\backups") "inventree-*.dump" { param($dump) Test-DumpIsRestorable $dump }
+<#
+.SYNOPSIS
+What to do with the database volume; exits 1 before anything starts when the answer is Refuse.
+#>
+function Confirm-RestoreDecision([string]$Verb) {
+    $decision = Get-RestoreDecision $databaseVolume (Join-Path $PSScriptRoot "data\backups") "inventree-*.dump" { param($dump) Get-DumpRejection $dump } $Fresh.IsPresent
+    if ($decision.Action -eq "Refuse") {
+        Format-RestoreRefusal $decision $databaseVolume "data\backups" $Verb | ForEach-Object { Write-Err $_ }
+        exit 1
+    }
+    if ($decision.Action -eq "Fresh" -and $Fresh) { Write-Step "Starting with an empty database (-Fresh)." }
+    return $decision
 }
 
 function Wait-DatabaseReachable {
     $deadline = (Get-Date).AddSeconds(120)
     while ((Get-Date) -lt $deadline) {
         docker compose @composeArgs exec -T db-backup pg_isready -h db -U inventree -d inventree | Out-Null
-        if ($LASTEXITCODE -eq 0) { return }
+        if ($LASTEXITCODE -eq 0) { return $true }
         Start-Sleep -Seconds 2
     }
-    Write-Err "The database did not become reachable within 120 s."; exit 1
+    return $false
+}
+
+function Invoke-EmptyDatabaseRestore([string]$DumpName) {
+    docker compose @composeArgs up -d db db-backup | Out-Host
+    if ($LASTEXITCODE -ne 0) { return "The database did not start." }
+    if (-not (Wait-DatabaseReachable)) { return "The database did not become reachable within 120 s." }
+    $restoreExit = Invoke-PgRestore $DumpName
+    if ($restoreExit -ne 0) { return "pg_restore reported errors (exit $restoreExit); check the output above." }
+    return ""
 }
 
 <#
 .SYNOPSIS
-Restores a dump into the empty database before anything else starts.
+Stops the stack and removes the database volume after a failed restore into it, then exits 1.
+.NOTES
+The volume was empty before this run, so removing it loses nothing, and the next `up` finds it empty
+again and retries instead of keeping a half-restored database.
+#>
+function Undo-FailedRestore([string]$Failure, [string]$DumpName) {
+    Write-Err $Failure
+    Write-Step "Stopping the stack and removing $databaseVolume, which was empty before this run..."
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        docker compose @composeArgs down
+        docker volume rm $databaseVolume | Out-Null
+        $volumeRemoved = $LASTEXITCODE -eq 0
+    }
+    finally { $ErrorActionPreference = $previousPreference }
+    if (-not $volumeRemoved) { Write-Err "Could not remove $databaseVolume; remove it (docker volume rm $databaseVolume) before the next up." }
+    Write-Err "Restoring $DumpName failed. Run .\docker-compose.ps1 up to try again, or start empty and restore by hand:"
+    Write-Err "  .\docker-compose.ps1 up -Fresh   then   .\docker-compose.ps1 restore $DumpName"
+    exit 1
+}
+
+<#
+.SYNOPSIS
+Restores the decision's dump into the empty database before anything else starts.
 .NOTES
 Only db and db-backup run meanwhile: on an empty schema the server would spend minutes migrating,
 outlast its healthcheck, and fail the whole `up`. The full start then finds the restored schema.
 #>
-function Restore-EmptyDatabase([System.IO.FileInfo]$Dump) {
-    if (-not $Dump) { return }
-    Write-Step "Restoring $($Dump.Name) ($(Format-DumpAge $Dump.LastWriteTime)) into the empty database..."
-    docker compose @composeArgs up -d db db-backup
-    if ($LASTEXITCODE -ne 0) { Write-Err "The database did not start."; exit 1 }
-    Wait-DatabaseReachable
-    $restoreExit = Invoke-PgRestore $Dump.Name
-    if ($restoreExit -ne 0) { Write-Err "pg_restore reported errors (exit $restoreExit); check the output above."; exit 1 }
-    Write-OK "Restored $($Dump.Name)."
+function Restore-EmptyDatabase([object]$Decision) {
+    if ($Decision.Action -ne "Restore") { return }
+    $dump = $Decision.Dump
+    foreach ($rejection in $Decision.Rejected) { Write-Host "  skipping $($rejection.Name): $($rejection.Reason)" -ForegroundColor Gray }
+    Write-Step "Restoring $($dump.Name) ($(Format-DumpAge $dump.LastWriteTime)) into the empty database..."
+    $failure = Invoke-EmptyDatabaseRestore $dump.Name
+    if ($failure) { Undo-FailedRestore $failure $dump.Name }
+    Write-OK "Restored $($dump.Name)."
+}
+
+function Invoke-Up {
+    Assert-Config
+    $decision = Confirm-RestoreDecision "up"
+    Connect-Tailnet
+    Restore-EmptyDatabase $decision
+    Write-Step "Starting InvenTree..."
+    docker compose @composeArgs up -d
+    if ($LASTEXITCODE -eq 0) { Initialize-StaticFiles; Show-Urls }
+}
+
+function Invoke-Recreate {
+    Assert-Config
+    $decision = Confirm-RestoreDecision "restart"
+    Connect-Tailnet
+    Restore-EmptyDatabase $decision
+    Write-Step "Recreating..."
+    docker compose @composeArgs up -d --force-recreate
+    if ($LASTEXITCODE -eq 0) { Initialize-StaticFiles }
+    Show-Urls
 }
 
 function Invoke-Data([object[]]$DataArguments) {
@@ -251,10 +324,10 @@ function Invoke-Data([object[]]$DataArguments) {
 
 $usage = @{
     "init-config" = "Create config.env and generate every missing secret"
-    "up"          = "Join the tailnet, then start the stack (default); migrations run on the server's start"
+    "up"          = "[-Fresh]  join the tailnet, restore an empty database from data\backups, start the stack (default); -Fresh starts it empty instead"
     "url"         = "Print the tailnet URL"
     "down"        = "Stop and remove the containers (the database volume and data/ stay)"
-    "restart"     = "Recreate the stack"
+    "restart"     = "[-Fresh]  recreate the stack, restoring an empty database as up does"
     "status"      = "Show the containers and their health"
     "logs"        = "[service]  follow logs, e.g. logs server"
     "backup"      = "Dump the database to data\backups now"
@@ -268,9 +341,9 @@ Set-Location $PSScriptRoot
 
 switch ($Command.ToLower()) {
     "init-config" { Initialize-Config; break }
-    "up"      { Assert-Config; $dumpToRestore = Get-InventreeDumpToRestore; Connect-Tailnet; Restore-EmptyDatabase $dumpToRestore; Write-Step "Starting InvenTree..."; docker compose @composeArgs up -d; if ($LASTEXITCODE -eq 0) { Initialize-StaticFiles; Show-Urls }; break }
+    "up"      { Invoke-Up; break }
     "down"    { Write-Step "Stopping everything..."; docker compose @composeArgs down; break }
-    "restart" { Assert-Config; Connect-Tailnet; Write-Step "Recreating..."; docker compose @composeArgs up -d --force-recreate; if ($LASTEXITCODE -eq 0) { Initialize-StaticFiles }; Show-Urls; break }
+    "restart" { Invoke-Recreate; break }
     "url"     { Show-Urls; break }
     "status"  { docker compose @composeArgs ps -a; break }
     "logs"    { docker compose @composeArgs logs -f @forwarded; break }
