@@ -5,19 +5,38 @@ $ProveBackupContainer = "inventree-db-backup"
 $ProveServerContainer = "inventree-server"
 $ProveImageBaseUrl = "http://localhost:8441"
 $ProveReadyTimeoutMinutes = 15
+$ProveUncomparedTables = @("public.django_q_ormq")
 
 <#
 .SYNOPSIS
 Table-by-table differences between two row-count maps, as printable lines; empty when they match.
+.NOTES
+Tables in Uncompared are skipped; they are printed by Write-UncomparedCounts instead.
 #>
-function Compare-TableCounts([System.Collections.IDictionary]$Before, [System.Collections.IDictionary]$After) {
+function Compare-TableCounts([System.Collections.IDictionary]$Before, [System.Collections.IDictionary]$After, [string[]]$Uncompared = @()) {
     $differences = @()
     foreach ($name in (@($Before.Keys) + @($After.Keys) | Sort-Object -Unique)) {
+        if ($name -in $Uncompared) { continue }
         $beforeCount = if ($Before.Contains($name)) { $Before[$name] } else { "missing" }
         $afterCount = if ($After.Contains($name)) { $After[$name] } else { "missing" }
         if ("$beforeCount" -ne "$afterCount") { $differences += "$name before=$beforeCount after=$afterCount" }
     }
     return $differences
+}
+
+<#
+.SYNOPSIS
+Prints the counts of the tables the comparison skips.
+.NOTES
+public.django_q_ormq is the worker's task queue, which it refills on every start, so a restore
+legitimately ends with different rows than the dump held.
+#>
+function Write-UncomparedCounts([System.Collections.IDictionary]$Before, [System.Collections.IDictionary]$After) {
+    foreach ($name in $ProveUncomparedTables) {
+        $beforeCount = if ($Before.Contains($name)) { $Before[$name] } else { "missing" }
+        $afterCount = if ($After.Contains($name)) { $After[$name] } else { "missing" }
+        Write-Host "  $name (not compared) before=$beforeCount after=$afterCount" -ForegroundColor Gray
+    }
 }
 
 function Get-InventreeTableCounts {
@@ -150,17 +169,22 @@ function Invoke-ProveData {
         $after = Get-InventreeTableCounts
     }
     catch { Write-RecoveryHint $newest.Name; throw }
-    $differences = Compare-TableCounts $before $after
+    Write-UncomparedCounts $before $after
+    $differences = Compare-TableCounts $before $after $ProveUncomparedTables
     if ($differences) {
         $differences | ForEach-Object { Write-Host "  DIFFERS $_" -ForegroundColor Red }
         Write-RecoveryHint $newest.Name
-        exit 1
     }
-    Write-Host "  all $($after.Count) tables match" -ForegroundColor Green
+    else { Write-Host "  all $($after.Count) tables match" -ForegroundColor Green }
 
     Write-Step "Fetching part image $imageName ..."
     $statusCode = Get-ImageStatusCode $imageName $token
-    if ($statusCode -ne 200) { Write-Err "part image answered $statusCode"; exit 1 }
-    Write-OK "part image answered 200"
+    $imageIsServed = $statusCode -eq 200
+    if ($imageIsServed) { Write-OK "part image answered 200" }
+    else {
+        Write-Err "part image answered $statusCode"
+        if (-not $differences) { Write-Err "The image check failed; the data is back." }
+    }
+    if ($differences -or -not $imageIsServed) { exit 1 }
     Write-OK "every table came back"
 }
