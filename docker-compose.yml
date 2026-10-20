@@ -56,7 +56,7 @@ services:
       - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
       - tailscale-socket:/var/run/tailscale
       - inventree-files:/srv/inventree:ro
-      - ./data/media:/srv/inventree/media:ro
+      - ./data/media:/srv/media:ro
       - inventree-caddy-data:/data
 
   # Joins the gateway's namespace and forwards tailnet :443 to Caddy. The node key lives in
@@ -142,7 +142,10 @@ services:
           # A dump killed mid-write (container stop) leaves its .tmp behind, and nothing else removes it.
           rm -f /backups/inventree-*.dump.tmp
           ts=$$(date +%Y%m%d-%H%M%S)
-          if pg_dump -h db -U inventree -d inventree -Fc -f /backups/inventree-$$ts.dump.tmp 2> /backups/last-error.log; then
+          tables=$$(psql -h db -U inventree -d inventree -Atc "select count(*) from information_schema.tables where table_schema = 'public'" 2>/dev/null)
+          if [ "$$tables" = "0" ]; then
+            log "skipped: database has no tables"
+          elif pg_dump -h db -U inventree -d inventree -Fc -f /backups/inventree-$$ts.dump.tmp 2> /backups/last-error.log; then
             mv /backups/inventree-$$ts.dump.tmp /backups/inventree-$$ts.dump
             log "created inventree-$$ts.dump"
           else
