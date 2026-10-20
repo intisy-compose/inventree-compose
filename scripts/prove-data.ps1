@@ -6,6 +6,7 @@ $ProveServerContainer = "inventree-server"
 $ProveImageBaseUrl = "http://localhost:8441"
 $ProveReadyTimeoutMinutes = 15
 $ProveUncomparedTables = @("public.django_q_ormq")
+$ProveHttpExceptionTypes = @("System.Net.WebException", "Microsoft.PowerShell.Commands.HttpResponseException", "System.Net.Http.HttpRequestException")
 
 <#
 .SYNOPSIS
@@ -95,14 +96,24 @@ function Get-ApiToken {
     return ($response.Content | ConvertFrom-Json).token
 }
 
+<#
+.SYNOPSIS
+The HTTP status the URL answers with the token, or $null when nothing answered.
+.NOTES
+PowerShell 5.1 throws a WebException for an error status and for a refused connection; PowerShell 7
+throws an HttpResponseException for an error status and an HttpRequestException when nothing answered.
+They are matched by name because the PowerShell 7 type does not exist in 5.1.
+#>
 function Get-HttpStatus([string]$Url, [string]$Token) {
     try {
         $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -Headers @{ Authorization = "Token $Token" }
         return [int]$response.StatusCode
     }
-    catch [System.Net.WebException] {
-        if (-not $_.Exception.Response) { return $null }
-        return [int]$_.Exception.Response.StatusCode
+    catch {
+        if ($_.Exception.GetType().FullName -notin $ProveHttpExceptionTypes) { throw }
+        $answer = $_.Exception.PSObject.Properties["Response"]
+        if (-not $answer -or -not $answer.Value) { return $null }
+        return [int]$answer.Value.StatusCode
     }
 }
 
