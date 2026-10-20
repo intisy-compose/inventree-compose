@@ -245,11 +245,11 @@ def plan_parts(taxonomy, client):
     for key, model in taxonomy["models"].items():
         body = part_body(taxonomy, model, categories)
         tags = sorted(model.get("tags", []))
-        current = parts.get(key)
+        current = parts.get(key) or parts.get(str(model.get("renamed_from", "")).lower())
         if current is None:
             changes.append(Change(f"+ model {model['name']}", lambda body=body, tags=tags: client.post("/api/part/", {**body, "tags": tags})))
             continue
-        differing = [name for name in ("description", "keywords", "category", "trackable") if (current.get(name) or "") != (body[name] or "")]
+        differing = [name for name in ("name", "description", "keywords", "category", "trackable") if (current.get(name) or "") != (body[name] or "")]
         if sorted(part_tags.get(current["pk"], set())) != tags:
             differing.append("tags")
         if differing:
