@@ -112,9 +112,10 @@ function Connect-Tailnet {
 # INVENTREE_AUTO_UPDATE migrates the database but leaves the static files of a fresh volume
 # uncollected, which serves the web UI without its assets.
 # A restart does not copy the plugins' static files, so the browser kept an old dashboard.js; collect them every time.
+# The check looks for the web UI itself: a folder holding only the plugins' files counted as collected.
 function Initialize-StaticFiles {
-    $count = docker compose @composeArgs exec -T server sh -c "ls /home/inventree/data/static 2>/dev/null | wc -l"
-    if ([int]"$count".Trim() -eq 0) {
+    $webIndexCount = docker compose @composeArgs exec -T server sh -c "ls /home/inventree/data/static/web/index.html 2>/dev/null | wc -l"
+    if ([int]"$webIndexCount".Trim() -eq 0) {
         Write-Step "Collecting static files..."
         docker compose @composeArgs exec -T server invoke static | Out-Null
     }
