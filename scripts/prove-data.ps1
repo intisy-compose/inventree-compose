@@ -5,7 +5,7 @@ $ProveBackupContainer = "inventree-db-backup"
 $ProveServerContainer = "inventree-server"
 $ProveImageBaseUrl = "http://localhost:8441"
 $ProveReadyTimeoutMinutes = 15
-$ProveUncomparedTables = @("public.django_q_ormq")
+$ProveUncomparedTables = @("public.django_q_ormq", "public.django_q_task")
 $ProveHttpExceptionTypes = @("System.Net.WebException", "Microsoft.PowerShell.Commands.HttpResponseException", "System.Net.Http.HttpRequestException")
 
 <#
@@ -29,7 +29,9 @@ function Compare-TableCounts([System.Collections.IDictionary]$Before, [System.Co
 .SYNOPSIS
 Prints the counts of the tables the comparison skips.
 .NOTES
-public.django_q_ormq is the worker's task queue, which it refills on every start, so a restore
+public.django_q_ormq is the worker's task queue, which it refills on every start, and public.django_q_task
+its rotating history of finished tasks, which it adds to and trims from the moment it starts (998
+after 1000 on 2026-11-03, 15 new rows within 20 minutes), so a restore
 legitimately ends with different rows than the dump held.
 #>
 function Write-UncomparedCounts([System.Collections.IDictionary]$Before, [System.Collections.IDictionary]$After) {
