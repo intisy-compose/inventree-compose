@@ -118,8 +118,10 @@ function Initialize-StaticFiles {
     if ([int]"$webIndexCount".Trim() -eq 0) {
         Write-Step "Collecting static files..."
         docker compose @composeArgs exec -T server invoke static | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Err "Warning: invoke static failed; the web UI may be served without its assets." }
     }
     docker compose @composeArgs exec -T server sh -c "cd /home/inventree/src/backend/InvenTree && python manage.py collectplugins" | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Err "Warning: collectplugins failed; the browser may keep the plugins' old static files." }
 }
 
 function Show-Urls {
@@ -166,6 +168,20 @@ function Assert-RestoreServicesRunning {
     exit 1
 }
 
+<#
+.SYNOPSIS
+Exits 1 before anything is stopped unless data\backups holds the named dump and it passes the same probe as the newest dump does.
+.NOTES
+pg_restore --clean drops every table first, so a dump with no table data would empty the live database.
+#>
+function Assert-NamedDumpRestorable([string]$Name) {
+    $path = Join-Path $PSScriptRoot "data\backups\$Name"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Write-Err "No dump named $Name in data\backups; nothing was stopped."; exit 1 }
+    try { $reason = Get-DumpRejection (Get-Item -LiteralPath $path) }
+    catch { Write-Err $_.Exception.Message; exit 1 }
+    if ($reason) { Write-Err "$Name cannot be restored: $reason; nothing was stopped."; exit 1 }
+}
+
 function Invoke-Restore([object[]]$RestoreArguments) {
     Assert-RestoreServicesRunning
     $file = if ($RestoreArguments) { "$($RestoreArguments[0])" } else { "" }
@@ -182,6 +198,7 @@ function Invoke-Restore([object[]]$RestoreArguments) {
         if (-not $file -and $lastRejection) { Write-Err "No dump in data\backups can be restored; the last one checked, $lastRejection."; exit 1 }
         if (-not $file) { Write-Err "No backups in data\backups."; exit 1 }
     }
+    else { Assert-NamedDumpRestorable (Split-Path $file -Leaf) }
     $file = Split-Path $file -Leaf
     Write-Step "Restoring $file (InvenTree is stopped meanwhile)..."
     docker compose @composeArgs stop gateway worker server
