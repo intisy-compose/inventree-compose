@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Stands in for curl: appends "curl URL" and the Authorization header it was given on stdin to
+# $FAKE_DOCKER_DIR/calls, and answers InvenTree's token, user and media URLs from the fake's state:
+#   api-status     the status /api/user/me/ answers (default 200)
+#   image-status   the status /media/part_images/... answers (default 200)
+#   token-fails    present: /api/user/token/ answers 401
+set -uo pipefail
+state=${FAKE_DOCKER_DIR:?}
+url=${!#}
+header=$(sed -n 's/^header = "\(.*\)"$/\1/p')
+printf 'curl %s %s\n' "$url" "$header" >>"$state/calls"
+state_value() { cat "$state/$1" 2>/dev/null || echo "$2"; }
+
+case "$url" in
+    */api/user/token/)
+        if [ -e "$state/token-fails" ]; then echo "curl: (22) The requested URL returned error: 401" >&2; exit 22; fi
+        echo '{"token": "inv-0123456789abcdef"}' ;;
+    */api/user/me/) printf '%s' "$(state_value api-status 200)" ;;
+    */media/part_images/*) printf '%s' "$(state_value image-status 200)" ;;
+    *) printf '000'; exit 7 ;;
+esac
