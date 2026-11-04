@@ -22,9 +22,10 @@ Every image is pinned to a version. Migrations run when the server starts on a n
 
 ## Quick start
 
-Requires [Docker](https://docs.docker.com/get-docker/), PowerShell (built into Windows; `pwsh`
-elsewhere) and a Tailscale account with
-[HTTPS certificates](https://tailscale.com/kb/1153/enabling-https) enabled.
+Requires [Docker](https://docs.docker.com/get-docker/) with the compose plugin, a Tailscale account
+with [HTTPS certificates](https://tailscale.com/kb/1153/enabling-https) enabled, and one of the two
+CLIs: `docker-compose.ps1` on Windows (PowerShell 5.1, built in), or `docker-compose.sh` on Linux
+(bash 4 or newer, git, `curl` and `python3`).
 
 ```powershell
 git clone --recursive https://github.com/intisy-compose/inventree-compose
@@ -32,8 +33,22 @@ cd inventree-compose
 
 .\docker-compose.ps1 init-config   # creates config.env and generates the passwords
 # put an auth key from https://login.tailscale.com/admin/settings/keys into TS_AUTHKEY in config.env
-.\docker-compose.ps1 up            # the one CLI; run it without a known command to list them all
+.\docker-compose.ps1 up            # run it without a known command to list them all
 ```
+
+On Linux the same steps are:
+
+```sh
+./docker-compose.sh init-config
+./docker-compose.sh up             # `./docker-compose.sh help` lists every command
+```
+
+Both CLIs have the same commands and messages and work on the same `config.env` and `data/`, so a
+stack started by one can be stopped by the other. The sh spells options in long form: `-Fresh` is
+`--fresh`. Every `.\docker-compose.ps1 <command>` below is `./docker-compose.sh <command>` on Linux,
+and `catalog` runs `python3` there. An option is not a command: `./docker-compose.sh --fresh` alone
+prints the usage and does not run `up` (where `.\docker-compose.ps1 -Fresh` does); write
+`./docker-compose.sh up --fresh`.
 
 `up` joins the tailnet first, reads the node's real `ts.net` name and writes `INVENTREE_HOST` into
 `config.env` before starting the rest, then prints both URLs. Sign in with `INVENTREE_ADMIN_USER` and
@@ -92,8 +107,18 @@ bind mount fails on file permissions. InvenTree's secrets (`secret_key.txt`, `oi
 are in `data/secrets` and its uploaded files in `data/media` (both gitignored); the volume
 `inventree-compose_inventree-files` keeps only static files and can be rebuilt.
 `db-backup` dumps the database every hour into `data/backups` and keeps the newest `BACKUP_KEEP`
-(48). `.\docker-compose.ps1 backup` takes one now and `restore [file]` puts one back (the newest by
-default). Part images come back with `catalog images`.
+(48). `.\docker-compose.ps1 backup` takes one now and `restore [file]` puts one back (the newest
+that `pg_restore` can read, by default). Part images come back with `catalog images`.
+
+`restore` needs `db` and `db-backup` running and starts InvenTree again only once `pg_restore`
+succeeded. When the volume is empty, `up` and `restart` restore the newest dump that `pg_restore` can
+read and that holds table data (an hourly dump of an empty database is skipped) while only `db` and
+`db-backup` run, so the server first meets the restored schema instead of migrating an empty one;
+a failed restore stops the stack and removes the volume it filled. They refuse to start an empty
+database while dumps exist that none can be restored from; `up -Fresh` (`up --fresh` on Linux)
+starts empty on purpose. Both collect the static files when the web UI's are missing and the
+plugins' every time. `prove-data` (destructive) dumps, deletes every volume, starts again, compares
+every table but the worker's queue and task history, and fetches a part image.
 
 `data/` is a git submodule. The public template is the default; point it at your own repo with
 `.\docker-compose.ps1 data use <owner/repo[@ref]>`.
