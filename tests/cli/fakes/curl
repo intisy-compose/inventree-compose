@@ -1,21 +1,42 @@
 #!/usr/bin/env bash
 # Stands in for curl: appends "curl URL" and the Authorization header it was given on stdin to
 # $FAKE_DOCKER_DIR/calls, and answers InvenTree's token, user and media URLs from the fake's state:
-#   api-status     the status /api/user/me/ answers (default 200)
+#   api-status     the status /api/user/me/ answers, one line per call, the last one repeated (default
+#                  200); 000 answers as a refused connection does, with exit 7
 #   image-status   the status /media/part_images/... answers (default 200)
 #   token-fails    present: /api/user/token/ answers 401
+# A credential on the command line, where every user of the host can read it, exits 99 instead.
 set -uo pipefail
 state=${FAKE_DOCKER_DIR:?}
+for argument in "$@"; do
+    case "$argument" in
+        *Authorization* | *"Token "* | *"Basic "*)
+            printf 'curl CREDENTIAL ON ARGV %s\n' "$argument" >>"$state/calls"
+            exit 99 ;;
+    esac
+done
 url=${!#}
 header=$(sed -n 's/^header = "\(.*\)"$/\1/p')
 printf 'curl %s %s\n' "$url" "$header" >>"$state/calls"
 state_value() { cat "$state/$1" 2>/dev/null || echo "$2"; }
 
+# api_status: the line of api-status for this call to /api/user/me/, or its last line.
+api_status() {
+    local calls answer
+    calls=$(grep -c '/api/user/me/' "$state/calls")
+    answer=$(sed -n "${calls}p" "$state/api-status" 2>/dev/null)
+    [ -n "$answer" ] || answer=$(tail -n 1 "$state/api-status" 2>/dev/null)
+    echo "${answer:-200}"
+}
+
 case "$url" in
     */api/user/token/)
         if [ -e "$state/token-fails" ]; then echo "curl: (22) The requested URL returned error: 401" >&2; exit 22; fi
         echo '{"token": "inv-0123456789abcdef"}' ;;
-    */api/user/me/) printf '%s' "$(state_value api-status 200)" ;;
+    */api/user/me/)
+        status=$(api_status)
+        printf '%s' "$status"
+        [ "$status" != 000 ] || exit 7 ;;
     */media/part_images/*) printf '%s' "$(state_value image-status 200)" ;;
     *) printf '000'; exit 7 ;;
 esac

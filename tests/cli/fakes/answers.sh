@@ -11,7 +11,8 @@
 #   volumes          names `docker volume ls -q` prints
 #   counts-N         the Nth table count's psql output (counts when there is none)
 #   web-index        what the server's count of static/web/index.html prints (default 1)
-#   pg-restore-exit, backup-exit, up-db-exit, up-exit, recreate-exit, volume-rm-exit: exit codes (default 0)
+#   pg-restore-exit, backup-exit, up-db-exit, up-exit, recreate-exit, volume-rm-exit, static-exit,
+#   collectplugins-exit: exit codes (default 0)
 # A `volume rm` of inventree-compose_inventree-db makes the volume missing, as a real removal would.
 
 state_value() { cat "$state/$1" 2>/dev/null || echo "${2:-}"; }
@@ -82,6 +83,8 @@ answer() {
         "run --rm -v "*":/backups:ro "*" pg_restore --list "*) answer_pg_restore_list "$@" ;;
         "compose exec -T tailscale "*) echo '{"BackendState": "Running", "Self": {"DNSName": "inventree.tail-test.ts.net."}}' ;;
         "compose exec -T server sh -c ls "*) state_value web-index 1 ;;
+        "compose exec -T server invoke static") return "$(state_value static-exit 0)" ;;
+        "compose exec -T server sh -c cd "*collectplugins) return "$(state_value collectplugins-exit 0)" ;;
         "compose exec -T db-backup pg_isready "*) return 0 ;;
         "compose exec -T db-backup pg_restore "*) return "$(state_value pg-restore-exit 0)" ;;
         "compose exec -T db-backup sh -c "*) answer_backup "${!#}" ;;

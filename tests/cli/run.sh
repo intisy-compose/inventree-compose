@@ -19,6 +19,7 @@ case_name=""
 case_failed=false
 output=""
 status=0
+extra_path=""
 
 new_stack() {
     rm -rf "$stack" "$state"
@@ -39,6 +40,7 @@ begin() {
     case_name=$1
     case_failed=false
     output=""
+    extra_path=""
     new_stack
 }
 
@@ -53,9 +55,17 @@ finish() {
 
 # run_cli ARGUMENTS...: runs the scratch CLI with the fakes, keeping its output and exit code.
 run_cli() {
-    output=$(cd "$scratch" && PATH="$fakes:$PATH" FAKE_DOCKER_DIR="$state" FAKE_BACKUPS="$stack/data/backups" \
+    output=$(cd "$scratch" && PATH="${extra_path:+$extra_path:}$fakes:$PATH" FAKE_DOCKER_DIR="$state" FAKE_BACKUPS="$stack/data/backups" \
         bash "$stack/docker-compose.sh" "$@" 2>&1)
     status=$?
+}
+
+# without_sleep: the next run_cli waits no real time, so a retry loop runs through in an instant.
+without_sleep() {
+    mkdir -p "$scratch/no-sleep"
+    printf '%s\n' '#!/bin/bash' 'exit 0' >"$scratch/no-sleep/sleep"
+    chmod +x "$scratch/no-sleep/sleep"
+    extra_path="$scratch/no-sleep"
 }
 
 check() {
@@ -495,6 +505,23 @@ run_cli up
 check "runs invoke static" called "^compose exec -T server invoke static$"
 finish
 
+begin "a failed invoke static or collectplugins is survived with a warning"
+set_state web-index 0
+set_state static-exit 1
+set_state collectplugins-exit 2
+run_cli up
+check "exits 0" status_is 0
+check "warns about invoke static" said "Warning: invoke static failed; the web UI may be served without its assets."
+check "warns about collectplugins" said "Warning: collectplugins failed; the browser may keep the plugins' old static files."
+check "still prints the URLs" said "InvenTree : https://"
+finish
+
+begin "steps that work print no warning"
+set_state web-index 0
+run_cli up
+check "no warning" not_said "Warning:"
+finish
+
 begin "restart collects the plugins too"
 run_cli restart
 check "exits 0" status_is 0
@@ -588,11 +615,45 @@ check "says so" said "pg_restore reported errors (exit 3); check the output abov
 check "no up after" not_called "^compose up -d$"
 finish
 
-begin "restore of a named file uses its name only"
+begin "restore of a named file probes it, then restores it by its name only"
+add_dump inventree-20261003-000000.dump
 set_state running db db-backup
 run_cli restore data/backups/inventree-20261003-000000.dump
 check "exits 0" status_is 0
+check "probes it first" called_before "pg_restore --list /backups/inventree-20261003-000000.dump$" "^compose stop gateway worker server$"
 check "restores that file" called "--clean --if-exists /backups/inventree-20261003-000000.dump$"
+check "says it restored" said "Restored inventree-20261003-000000.dump."
+finish
+
+begin "restore of a named file that is not in data/backups stops nothing"
+add_dump inventree-20261001-000000.dump
+set_state running db db-backup
+run_cli restore inventree-2026100-000000.dump
+check "exits 1" status_is 1
+check "says so" said "No dump named inventree-2026100-000000.dump in data/backups; nothing was stopped."
+check "stops nothing" not_called "^compose stop"
+check "restores nothing" not_called "pg_restore -h db"
+finish
+
+begin "restore of a named dump without table data stops nothing"
+add_dump inventree-20261001-000000.dump
+set_state no-table-data inventree-20261001-000000.dump
+set_state running db db-backup
+run_cli restore inventree-20261001-000000.dump
+check "exits 1" status_is 1
+check "names the reason" said "inventree-20261001-000000.dump cannot be restored: it holds no table data; nothing was stopped."
+check "stops nothing" not_called "^compose stop"
+check "restores nothing" not_called "pg_restore -h db"
+finish
+
+begin "restore of a named dump docker cannot probe stops nothing"
+add_dump inventree-20261001-000000.dump
+set_state probe-fails inventree-20261001-000000.dump
+set_state running db db-backup
+run_cli restore inventree-20261001-000000.dump
+check "exits 1" status_is 1
+check "names the docker exit" said "docker could not run pg_restore --list on inventree-20261001-000000.dump (exit 125)"
+check "stops nothing" not_called "^compose stop"
 finish
 
 begin "restore without any dump says so"
@@ -776,6 +837,24 @@ check "exits 1" status_is 1
 check "the tables match" said "all 4 tables match"
 check "names the status" said "part image answered 404"
 check "says the data is back" said "The image check failed; the data is back."
+finish
+
+begin "prove-data waits out an API that does not answer yet"
+prove_ready
+set_state api-status 000 000 502 200
+without_sleep
+run_cli prove-data
+check "exits 0" status_is 0
+check "asks until it answers 200" call_count_is "/api/user/me/" 4
+check "says every table came back" said "every table came back"
+finish
+
+begin "prove-data never puts a credential on curl's command line"
+prove_ready
+run_cli prove-data
+check "exits 0" status_is 0
+check "no credential on argv" not_called "CREDENTIAL ON ARGV"
+check "the fake would catch one" bash -c 'FAKE_DOCKER_DIR="$1" "$2/curl" -H "Authorization: Token x" http://localhost:8441/api/user/me/ </dev/null >/dev/null; [ $? -eq 99 ]' _ "$state" "$fakes"
 finish
 
 begin "prove-data fails at once when the restored API rejects the old token"

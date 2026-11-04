@@ -165,16 +165,18 @@ connect_tailnet() {
 # fresh volume uncollected, which serves the web UI without its assets; the check looks for the web UI
 # itself, because a folder holding only the plugins' files counted as collected. A restart does not
 # copy the plugins' static files either, so the browser kept an old dashboard.js: they are collected
-# every time. Like the ps1, neither step's exit code stops the command.
+# every time. Like the ps1, a failed step is warned about and never stops the command.
 initialize_static_files() {
     local web_index_count
     web_index_count=$("${compose[@]}" exec -T server sh -c "ls /home/inventree/data/static/web/index.html 2>/dev/null | wc -l" || true)
     web_index_count=$(tr -d ' \r\n' <<<"$web_index_count")
     if [ "${web_index_count:-0}" = 0 ]; then
         step "Collecting static files..."
-        "${compose[@]}" exec -T server invoke static >/dev/null || true
+        "${compose[@]}" exec -T server invoke static >/dev/null ||
+            err "Warning: invoke static failed; the web UI may be served without its assets."
     fi
-    "${compose[@]}" exec -T server sh -c "cd /home/inventree/src/backend/InvenTree && python manage.py collectplugins" >/dev/null || true
+    "${compose[@]}" exec -T server sh -c "cd /home/inventree/src/backend/InvenTree && python manage.py collectplugins" >/dev/null ||
+        err "Warning: collectplugins failed; the browser may keep the plugins' old static files."
 }
 
 show_urls() {
@@ -211,6 +213,16 @@ assert_restore_services_running() {
     fail "Cannot restore: $(join_by ', ' "${missing[@]}") not running. Run ./docker-compose.sh up first, or ./docker-compose.sh up --fresh and then restore."
 }
 
+# assert_named_dump_restorable NAME: exits 1 before anything is stopped unless data/backups holds NAME
+# and it passes the same probe as the newest dump does. `pg_restore --clean` drops every table first,
+# so a dump with no table data would empty the live database.
+assert_named_dump_restorable() {
+    local name=$1 reason
+    [ -f "$backups_folder/$name" ] || fail "No dump named $name in data/backups; nothing was stopped."
+    reason=$(get_dump_rejection "$backups_folder/$name") || fail "$reason"
+    [ -z "$reason" ] || fail "$name cannot be restored: $reason; nothing was stopped."
+}
+
 # invoke_restore [FILE]: restores FILE, or the newest restorable dump, into the running database.
 invoke_restore() {
     local file=${1:-} name reason last_rejection="" restore_exit=0
@@ -226,6 +238,8 @@ invoke_restore() {
         [ -n "$file" ] || [ -z "$last_rejection" ] ||
             fail "No dump in data/backups can be restored; the last one checked, $last_rejection."
         [ -n "$file" ] || fail "No backups in data/backups."
+    else
+        assert_named_dump_restorable "${file##*/}"
     fi
     file=${file##*/}
     step "Restoring $file (InvenTree is stopped meanwhile)..."
