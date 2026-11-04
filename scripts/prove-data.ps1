@@ -168,6 +168,7 @@ function Invoke-ProveData {
 
     Write-Step "Counting rows before ..."
     $before = Get-InventreeTableCounts
+    if ($before.Count -eq 0) { throw "no table was counted; nothing was deleted" }
     Write-Host "  $($before.Count) tables, dump $($newest.Name)" -ForegroundColor Gray
 
     Write-Step "Stopping the stack and deleting its volumes ..."
