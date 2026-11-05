@@ -5,12 +5,15 @@
 #                  200); 000 answers as a refused connection does, with exit 7
 #   image-status   the status /media/part_images/... answers (default 200)
 #   token-fails    present: /api/user/token/ answers 401
+#   tailnet-devices  the Tailscale API's devices, "NODE_ID NAME" per line: a DELETE of one in it
+#                  answers 200 and removes it, of any other 404
+#   tailnet-status   present: every Tailscale API call answers this status instead (000 as refused)
 # A credential on the command line, where every user of the host can read it, exits 99 instead.
 set -uo pipefail
 state=${FAKE_DOCKER_DIR:?}
 for argument in "$@"; do
     case "$argument" in
-        *Authorization* | *"Token "* | *"Basic "*)
+        *Authorization* | *"Token "* | *"Basic "* | *Bearer* | *tskey-*)
             printf 'curl CREDENTIAL ON ARGV %s\n' "$argument" >>"$state/calls"
             exit 99 ;;
     esac
@@ -38,5 +41,18 @@ case "$url" in
         printf '%s' "$status"
         [ "$status" != 000 ] || exit 7 ;;
     */media/part_images/*) printf '%s' "$(state_value image-status 200)" ;;
+    https://api.tailscale.com/api/v2/device/*)
+        node=${url##*/}
+        if [ -e "$state/tailnet-status" ]; then
+            status=$(cat "$state/tailnet-status")
+            printf '%s' "$status"
+            [ "$status" != 000 ] || exit 7
+        elif grep -q "^$node " "$state/tailnet-devices" 2>/dev/null; then
+            grep -v "^$node " "$state/tailnet-devices" >"$state/tailnet-devices.next"
+            mv "$state/tailnet-devices.next" "$state/tailnet-devices"
+            printf 200
+        else
+            printf 404
+        fi ;;
     *) printf '000'; exit 7 ;;
 esac
