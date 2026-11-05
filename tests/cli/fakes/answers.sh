@@ -91,6 +91,7 @@ answer() {
         "compose ps --status running --services") state_value running ;;
         "compose up -d db db-backup") return "$(state_value up-db-exit 0)" ;;
         "compose up -d") return "$(state_value up-exit 0)" ;;
+        "compose down") return "$(state_value down-exit 0)" ;;
         "compose up -d --force-recreate") return "$(state_value recreate-exit 0)" ;;
         "volume rm "*) shift 2; answer_volume_rm "$@" ;;
         "volume ls "*) state_value volumes ;;

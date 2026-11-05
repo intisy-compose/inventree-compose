@@ -51,6 +51,21 @@ prints the usage and does not run `up` (where `.\docker-compose.ps1 -Fresh` does
 the generated `INVENTREE_ADMIN_PASSWORD`. The auth key is only used for the first join; the node
 identity stays in `data/tailscale` afterwards.
 
+## Deleting the stack
+
+`down` keeps the node in the tailnet, so the next `up` comes back under the same name. To remove the
+stack for good, run `.\docker-compose.ps1 delete`, then remove the folder. `delete` runs `down`, removes
+the node from the tailnet, and removes `data/tailscale`, so a later `up` joins fresh. It finds the
+node by the stable node ID in `data/tailscale/tailscaled.state`, never by its name, so another device
+named `inventree` stays.
+
+The removal goes through the Tailscale API with `TS_API_TOKEN` from `config.env`: an access token
+from [Settings, Keys](https://login.tailscale.com/admin/settings/keys) of an account that may remove
+devices (Owner, Admin or IT admin). Without one, `delete` prints the node's name and ID to remove on
+the [Machines page](https://login.tailscale.com/admin/machines) instead. When the API refuses or
+does not answer, `data/tailscale` stays and `delete` can run again. The volumes stay in Docker until
+`docker volume rm` removes them; the data they held is in `data/`.
+
 ## Catalog
 
 The catalog tool drives InvenTree through its REST API from declared files, so the structure cannot
